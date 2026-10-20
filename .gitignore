@@ -1,0 +1,21 @@
+node_modules
+dist
+dist-public
+mcp-api-proxy-*.zip
+mcp-api-proxy-*.zip.sha256
+danskebank-mcp-api-proxy-*.tgz
+danskebank-mcp-api-proxy-*.tgz.sha256
+*.log
+.env
+.env.local
+.DS_Store
+coverage
+/.vscode/mcp.json
+/release-provenance
+
+# Stage 2: never commit secrets / PEMs
+*.pem
+*.key
+# but DO keep the internal test CA tracked in git for local dev/testing —
+# it must never be published (see package.json's "files" and MAINTAINERS.md)
+!certs/danske.pem
