@@ -6,7 +6,7 @@ import { z } from "zod";
 
 const manifest = z.object({
   engines: z.object({ node: z.string() }),
-  scripts: z.record(z.string()),
+  scripts: z.record(z.string(), z.string()),
   devDependencies: z.object({
     vitest: z.string(),
     "@vitest/coverage-v8": z.string(),
@@ -14,10 +14,10 @@ const manifest = z.object({
 }).parse(JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")));
 
 const lock = z.object({
-  packages: z.record(z.object({
+  packages: z.record(z.string(), z.object({
     version: z.string(),
     engines: z.object({ node: z.string().optional() }).optional(),
-    peerDependencies: z.record(z.string()).optional(),
+    peerDependencies: z.record(z.string(), z.string()).optional(),
   })),
 }).parse(JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")));
 

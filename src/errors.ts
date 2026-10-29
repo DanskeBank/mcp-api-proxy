@@ -7,7 +7,7 @@ export const ERROR_CATEGORIES = [
 export type ErrorCategory = (typeof ERROR_CATEGORIES)[number];
 
 const MESSAGES: Record<ErrorCategory, string> = {
-  auth: "Authentication failed. Check CLIENT_ID, CLIENT_CERT_PEM, CLIENT_KEY_PEM, TOKEN_SCOPE and the token URL settings.",
+  auth: "Authentication failed. Check CLIENT_ID, CLIENT_CERT_PEM, CLIENT_KEY_PEM and API access.",
   configuration: "Proxy configuration is invalid. Check the named settings and restart the proxy.",
   upstream: "The upstream request failed. Check connectivity and the service configuration.",
   internal: "The proxy could not complete the operation.",

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { Agent, type Dispatcher } from "undici";
+import { readCaBundle } from "../ca-bundle.js";
 import type { EnvironmentAuth } from "../types/index.js";
 
 /**
@@ -31,7 +32,7 @@ export function buildMtlsAgent(
       `Client key at ${auth.keyPath} does not contain a PRIVATE KEY block.`,
     );
   }
-  const ca = caPath ? fs.readFileSync(caPath) : undefined;
+  const ca = caPath ? readCaBundle(caPath) : undefined;
 
   return new Agent({
     connect: {

@@ -14,7 +14,8 @@
  *
  * Consumers are responsible for wiring `handleRequest` into a Node HTTP
  * server (or framework adapter) and deciding their own origin / auth policy.
- * {@link createLoopbackOriginCheck} is provided for the common case.
+ * {@link createLoopbackOriginCheck} and {@link createLoopbackHostCheck} are
+ * provided for the common case.
  */
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -365,4 +366,32 @@ export function createLoopbackOriginCheck(
       return false;
     }
   };
+}
+
+export interface LoopbackHostCheckOptions {
+  /** Port the HTTP server listens on. */
+  port: number;
+}
+
+const LOOPBACK_HOST_NAMES = ["localhost", "127.0.0.1", "[::1]"];
+
+/**
+ * DNS-rebinding protection helper for the `Host` header. A rebound page keeps
+ * the attacker's host name in `Host`, also for requests without an `Origin`
+ * (which {@link createLoopbackOriginCheck} accepts). Returns a predicate that
+ * accepts only a loopback host name on the configured port; a request without
+ * a `Host` header is rejected.
+ *
+ * Use it only when the server listens on a loopback address: other addresses
+ * are reached under host names this check cannot know.
+ */
+export function createLoopbackHostCheck(
+  options: LoopbackHostCheckOptions,
+): (host: string | undefined) => boolean {
+  const allowed = new Set(LOOPBACK_HOST_NAMES.map((name) => `${name}:${options.port}`));
+  // A Host header leaves out the default port of the scheme.
+  if (options.port === 80) {
+    for (const name of LOOPBACK_HOST_NAMES) allowed.add(name);
+  }
+  return (host) => host !== undefined && allowed.has(host.toLowerCase());
 }

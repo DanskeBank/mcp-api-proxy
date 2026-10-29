@@ -1,4 +1,4 @@
-import { fetch as undiciFetch, type Dispatcher } from "undici";
+import { fetch as undiciFetch } from "undici";
 import type { ApiResponse, ExecuteParams } from "../types/index.js";
 import { buildFetchWithCa } from "./fetch-with-ca.js";
 import type { TokenManager, AuthTier } from "../auth/token-manager.js";
@@ -11,7 +11,7 @@ export interface AuthFetchInit {
 }
 
 export interface ApicExecutorOptions {
-  /** Optional path to extra CA bundle (PEM) for non-public API hosts (mock tier). */
+  /** Optional path to an extra CA bundle (PEM) for the mock tier. */
   extraCaCertPath?: string;
   /** Required for sandbox/live calls. May be omitted for mock-only deployments. */
   tokenManager?: TokenManager;
@@ -32,19 +32,19 @@ const MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MiB
 /**
  * HTTP executor for API Connect calls.
  *
- * - mock tier: unauthenticated, uses bundled CA when configured.
+ * - mock tier: unauthenticated, uses the extra CA bundle when configured.
  * - sandbox / live: mTLS Dispatcher from TokenManager + Bearer token.
  *   On a 401 the token is invalidated and the call is retried once.
  */
 export class ApicExecutor {
   private readonly mockFetch: typeof fetch;
   private readonly tokenManager?: TokenManager;
-  private readonly authFetchImpl?: ApicExecutorOptions["authFetch"];
+  private readonly authFetchImpl: ApicExecutorOptions["authFetch"];
 
   constructor(options: ApicExecutorOptions = {}) {
     this.mockFetch = options.extraCaCertPath
       ? buildFetchWithCa(options.extraCaCertPath)
-      : (fetch as typeof fetch);
+      : fetch;
     this.tokenManager = options.tokenManager;
     this.authFetchImpl = options.authFetch;
   }
@@ -133,12 +133,12 @@ export class ApicExecutor {
       return undiciFetch(url, {
         method: init.method,
         headers: init.headers,
-        ...(init.body !== undefined ? { body: init.body } : {}),
+        ...(init.body === undefined ? {} : { body: init.body }),
         signal: init.signal,
-        dispatcher: tokenManager.getDispatcher(tier) as Dispatcher,
+        dispatcher: tokenManager.getDispatcher(tier),
         // Return a 3xx as is: following it would carry the bearer token and client certificate along.
         redirect: "manual",
-      }) as unknown as Response;
+      });
     };
 
     let response = await doCall();

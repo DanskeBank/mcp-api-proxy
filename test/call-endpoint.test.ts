@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import {
   buildCallEndpointToolDefinition,
+  callEndpointSchema,
   callEndpointToolDefinition,
   getToolDescription,
   handleCallEndpoint,
@@ -254,6 +255,18 @@ describe("handleCallEndpoint", () => {
         );
         expect(resultPayload(result)).toMatchObject({
           error: { nextStep: expect.stringContaining(hint) },
+        });
+      }
+    });
+
+    it("tells the user how to narrow the token scope when authentication fails", async () => {
+      for (const status of [401, 403] as const) {
+        const result = await handleCallEndpoint(
+          { method: "GET", url: "/accounts", tier: "mock" },
+          makeDeps({ apicExecutor: makeExecutor({ status, headers: {}, body: null }) }),
+        );
+        expect(resultPayload(result)).toMatchObject({
+          error: { nextStep: expect.stringContaining("set TOKEN_SCOPE to the scopes it is registered for") },
         });
       }
     });
@@ -1038,6 +1051,84 @@ describe("call_endpoint tool contract", () => {
     expect(result.isError).toBe(true);
     expectStructuredResult(result);
   });
+});
+
+describe("call_endpoint input schema", () => {
+  const inputSchema = () => buildCallEndpointToolDefinition(makeConfig()).inputSchema;
+
+  it("advertises the wire schema agents were given before the zod 4 upgrade", () => {
+    expect(inputSchema()).toEqual({
+      type: "object",
+      properties: {
+        method: {
+          type: "string",
+          enum: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+          description: "HTTP method",
+        },
+        url: { type: "string", description: expect.stringContaining("Request path") },
+        tier: {
+          type: "string",
+          enum: ["live", "sandbox", "mock"],
+          description: expect.stringContaining("Target tier"),
+        },
+        queryParams: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: "Query string parameters",
+        },
+        headers: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: expect.stringContaining("Authorization and Content-Type"),
+        },
+        body: {
+          type: "object",
+          additionalProperties: {},
+          description: "Request body for POST/PUT/PATCH",
+        },
+      },
+      required: ["method", "url"],
+      additionalProperties: false,
+    });
+  });
+
+  // The body-on-GET/DELETE rule is not expressible in JSON Schema, and the runtime
+  // validator strips unknown keys where the schema forbids them, so neither is listed here.
+  it.each([
+    { method: "GET", url: "/x" },
+    { method: "POST", url: "/x", tier: "mock", body: { a: { b: [1] } }, queryParams: { a: "1" }, headers: { "x-a": "1" } },
+    { method: "get", url: "/x" },
+    { method: "TRACE", url: "/x" },
+    { method: "GET" },
+    { method: "GET", url: 5 },
+    { method: "GET", url: "/x", tier: "prod" },
+    { method: "GET", url: "/x", tier: null },
+    { method: "GET", url: "/x", queryParams: { a: 1 } },
+    { method: "GET", url: "/x", queryParams: [] },
+    { method: "GET", url: "/x", headers: { "x-a": 1 } },
+    { method: "POST", url: "/x", body: [] },
+    { method: "POST", url: "/x", body: "text" },
+    { method: "POST", url: "/x", body: null },
+  ])("accepts and rejects the same input as the runtime validator (%#)", (input) => {
+    const validate = new AjvJsonSchemaValidator().getValidator(inputSchema());
+    expect(validate(input).valid).toBe(callEndpointSchema.safeParse(input).success);
+  });
+
+  it.each(["queryParams", "headers", "body"])(
+    "drops a __proto__ key from %s instead of passing it on or polluting prototypes",
+    (field) => {
+      const value = field === "body" ? '{"__proto__":{"polluted":true},"a":"1"}' : '{"__proto__":"x","a":"1"}';
+      const input = JSON.parse(`{"method":"POST","url":"/x","${field}":${value}}`);
+
+      const parsed = callEndpointSchema.parse(input);
+      const result = parsed[field as keyof typeof parsed];
+
+      expect(typeof result).toBe("object");
+      expect(Reflect.ownKeys(result as object)).toEqual(["a"]);
+      expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    },
+  );
 });
 
 describe("call_endpoint description", () => {

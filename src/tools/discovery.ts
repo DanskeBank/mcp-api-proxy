@@ -25,6 +25,17 @@ import type {
 
 export interface RegisterToolsOptions {
   auditLogger?: AuditLogger;
+  /** Why hosted discovery is unavailable, when the proxy can explain it (refused or unverifiable API key). */
+  upstreamProblem?: ProxyError;
+}
+
+export function discoveryUnavailableMessage(problem: ProxyError): string {
+  return (
+    `${problem.message} Hosted discovery tools are unavailable in this session; ` +
+    `only "${CALL_ENDPOINT_TOOL_NAME}" is available. ` +
+    "Tell the user about this problem: discovery returns once it is resolved and the proxy is restarted. " +
+    "Do not retry the discovery tools."
+  );
 }
 
 async function safeAudit(logger: AuditLogger | undefined, event: AuditEvent): Promise<void> {
@@ -71,9 +82,17 @@ async function executeTool(
   args: Record<string, unknown> | undefined,
   mcpClient: McpClient | null,
   deps: CallEndpointDeps,
+  upstreamProblem?: ProxyError,
 ): Promise<CallToolResult> {
   if (name === CALL_ENDPOINT_TOOL_NAME) return handleCallEndpoint(args, deps);
   if (mcpClient) return sanitizeUpstreamResult(await mcpClient.callTool(name, args));
+  if (upstreamProblem) {
+    return {
+      _meta: { errorCategory: upstreamProblem.category },
+      content: [{ type: "text", text: discoveryUnavailableMessage(upstreamProblem) }],
+      isError: true,
+    };
+  }
   return {
     content: [{ type: "text", text:
       "Unknown tool. The upstream discovery server is not connected; " +
@@ -109,7 +128,7 @@ export function registerTools(
   callEndpointDeps: CallEndpointDeps,
   options: RegisterToolsOptions = {},
 ): void {
-  const { auditLogger } = options;
+  const { auditLogger, upstreamProblem } = options;
   const { config } = callEndpointDeps;
   const localToolDef = buildCallEndpointToolDefinition(config);
 
@@ -122,7 +141,7 @@ export function registerTools(
       const upstream = await mcpClient.listTools();
       return { tools: [...upstream, localToolDef] };
     } catch (err) {
-      throw new ProxyError("upstream", { cause: err });
+      throw err instanceof ProxyError ? err : new ProxyError("upstream", { cause: err });
     }
   });
 
@@ -145,7 +164,7 @@ export function registerTools(
 
       let result: CallToolResult;
       try {
-        result = await executeTool(name, args, mcpClient, callEndpointDeps);
+        result = await executeTool(name, args, mcpClient, callEndpointDeps, upstreamProblem);
       } catch (err) {
         const message = safeErrorMessage(err, "upstream");
         await safeAudit(auditLogger, {

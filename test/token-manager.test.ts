@@ -3,6 +3,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { Agent, type Dispatcher } from "undici";
 import { TokenManager } from "../src/auth/token-manager.js";
+import { DEFAULT_TOKEN_SCOPE } from "../src/config/profiles.js";
 import type { Config } from "../src/config/config.js";
 import type { EnvironmentAuth, Tier } from "../src/types/index.js";
 
@@ -239,7 +240,7 @@ describe("TokenManager", () => {
   it("passes config.extraCaCertPath through to the agent factory", () => {
     const factory = vi.fn(() => FAKE_DISPATCHER);
     const tm = new TokenManager({
-      config: makeConfig({ extraCaCertPath: "/tmp/internal-ca.pem" }),
+      config: makeConfig({ extraCaCertPath: "/tmp/extra-ca.pem" }),
       fetchImpl: vi.fn() as never,
       agentFactory: factory,
       now: () => now,
@@ -247,7 +248,7 @@ describe("TokenManager", () => {
     tm.getDispatcher("sandbox");
     expect(factory).toHaveBeenCalledWith(
       expect.anything(),
-      "/tmp/internal-ca.pem",
+      "/tmp/extra-ca.pem",
     );
   });
 
@@ -578,7 +579,7 @@ describe("OAuth token response validation", () => {
     }
   });
 
-  it("continues using TOKEN_SCOPE when the granted scope differs", async () => {
+  it("continues requesting the configured scope when the granted scope differs", async () => {
     let now = 1_000_000;
     const fetchImpl = vi.fn().mockImplementation(async () => tokenResponse({
       ...valid,
@@ -597,5 +598,83 @@ describe("OAuth token response validation", () => {
     } finally {
       await tm.close();
     }
+  });
+});
+
+describe("requested scope and rejected token requests", () => {
+  const tokenUrl = "https://example.test/live/token";
+  const sentinel = "private-token-scope-8675309";
+
+  function setup(response: Response, tokenScope?: string) {
+    const fetchImpl = vi.fn().mockResolvedValue(response);
+    const tm = new TokenManager({
+      config: makeConfig({
+        clientId: "client-abc",
+        sandbox: undefined,
+        ...(tokenScope ? { tokenScope } : {}),
+        live: { certPath: "/tmp/live.crt", keyPath: "/tmp/live.key", tokenUrl },
+      }),
+      fetchImpl: fetchImpl as never,
+      agentFactory: () => FAKE_DISPATCHER,
+    });
+    return { tm, fetchImpl };
+  }
+
+  it("requests every product in one space-delimited scope", async () => {
+    const { tm, fetchImpl } = setup(
+      tokenResponse({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }),
+      "accounts payments",
+    );
+
+    await tm.getToken("live");
+
+    const [url, init] = fetchImpl.mock.calls[0] as [string, { body: string }];
+    expect(url).toBe(tokenUrl);
+    expect(init.body).toContain("scope=accounts+payments");
+    expect(new URLSearchParams(init.body).get("scope")).toBe("accounts payments");
+  });
+
+  it.each([400, 401, 403])(
+    "tells the user how to narrow the scope when the token request is rejected with %i",
+    async (status) => {
+      const { tm } = setup(
+        new Response(sentinel, { status, headers: { "content-type": "text/plain" } }),
+        DEFAULT_TOKEN_SCOPE,
+      );
+
+      const failure = await tm.getToken("live").catch((err: Error) => err);
+
+      expect(failure).toBeInstanceOf(Error);
+      const message = (failure as Error).message;
+      expect(message).toContain(`[auth] live tier (HTTP ${status}):`);
+      expect(message).toContain(`requests the scopes "${DEFAULT_TOKEN_SCOPE}"`);
+      expect(message).toContain("set TOKEN_SCOPE (for example TOKEN_SCOPE=accounts)");
+      expect(message).not.toContain(sentinel);
+    },
+  );
+
+  it("does not echo a scope the user chose, and points at it instead", async () => {
+    const { tm } = setup(new Response("", { status: 400 }), `accounts-${sentinel}`);
+
+    const failure = (await tm.getToken("live").catch((err: Error) => err)) as Error;
+
+    expect(failure.message).toContain("registered for the scopes in TOKEN_SCOPE");
+    expect(failure.message).not.toContain(sentinel);
+    expect(failure.message).not.toContain("for example TOKEN_SCOPE=accounts");
+  });
+
+  it.each([302, 500, 503])("gives no scope advice for a %i token response", async (status) => {
+    const { tm } = setup(new Response("", { status }), DEFAULT_TOKEN_SCOPE);
+
+    const failure = (await tm.getToken("live").catch((err: Error) => err)) as Error;
+
+    expect(failure.message).toContain(`[auth] live tier (HTTP ${status}):`);
+    expect(failure.message).not.toContain("TOKEN_SCOPE");
+  });
+
+  it("still reports missing credentials for the tier as an authentication failure", async () => {
+    const { tm } = setup(new Response("", { status: 400 }));
+
+    await expect(tm.getToken("sandbox")).rejects.toThrow(/\[auth\] sandbox tier/);
   });
 });

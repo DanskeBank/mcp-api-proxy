@@ -8,6 +8,7 @@ import { registerTools } from "../src/tools/discovery.js";
 import type { McpClient } from "../src/clients/mcp-client.js";
 import type { ApicExecutor } from "../src/clients/apic-executor.js";
 import type { Config } from "../src/config/config.js";
+import { ProxyError } from "../src/errors.js";
 import {
   ConsoleAuditLogger,
   type AuditEvent,
@@ -56,6 +57,7 @@ async function setupClient(opts: {
   upstream?: McpClient | null;
   executor?: ApicExecutor;
   auditLogger?: AuditLogger;
+  upstreamProblem?: ProxyError;
 }) {
   const server = new McpServer(
     { name: "test-proxy", version: "0.0.0" },
@@ -70,7 +72,7 @@ async function setupClient(opts: {
         opts.executor ??
         makeExecutor({ status: 200, headers: {}, body: { ok: true } }),
     },
-    { auditLogger: opts.auditLogger },
+    { auditLogger: opts.auditLogger, upstreamProblem: opts.upstreamProblem },
   );
 
   const [clientTransport, serverTransport] =
@@ -214,6 +216,64 @@ describe("registerTools", () => {
       const unavailable = await client.callTool({ name: "search_apis", arguments: {} });
       expect(unavailable.isError).toBe(true);
       expect(JSON.stringify(unavailable.content)).toContain("not connected");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("tells the agent why hosted discovery is unavailable when the API key was refused", async () => {
+    const problem = new ProxyError("auth", {
+      hint: "The hosted MCP server rejected MCP_SERVER_API_KEY. Check the key.",
+    });
+    const events: AuditEvent[] = [];
+    const { client, server } = await setupClient({
+      upstream: null,
+      upstreamProblem: problem,
+      auditLogger: {
+        logToolCall: async () => {},
+        logToolResult: async (event) => {
+          events.push(event);
+        },
+      },
+    });
+    try {
+      const unavailable = await client.callTool({ name: "search_apis", arguments: {} });
+      expect(unavailable.isError).toBe(true);
+      expect(unavailable._meta).toEqual({ errorCategory: "auth" });
+      const text = JSON.stringify(unavailable.content);
+      expect(text).toContain("[auth]");
+      expect(text).toContain("rejected MCP_SERVER_API_KEY");
+      expect(text).toContain('only \\"call_endpoint\\" is available');
+      expect(text).toContain("discovery returns once it is resolved and the proxy is restarted");
+      expect(text).toContain("Do not retry the discovery tools.");
+      expect(text).not.toContain("not connected");
+      expect(events[0].result?.error).toBe("[auth]");
+
+      const local = await client.callTool({ name: "call_endpoint", arguments: {
+        method: "GET", url: "/accounts", tier: "mock",
+      } });
+      expect(local.isError).toBeFalsy();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("keeps an API-key explanation from upstream tools/list and tools/call failures", async () => {
+    const problem = new ProxyError("auth", {
+      hint: "The hosted MCP server rejected MCP_SERVER_API_KEY. Check the key.",
+    });
+    const upstream = makeUpstream({
+      listTools: vi.fn().mockRejectedValue(problem),
+      callTool: vi.fn().mockRejectedValue(problem),
+    });
+    const { client, server } = await setupClient({ upstream });
+    try {
+      await expect(client.listTools()).rejects.toThrow(/\[auth\].*rejected MCP_SERVER_API_KEY/);
+      await expect(client.callTool({ name: "search_apis", arguments: {} })).rejects.toThrow(
+        /\[auth\].*rejected MCP_SERVER_API_KEY/,
+      );
     } finally {
       await client.close();
       await server.close();

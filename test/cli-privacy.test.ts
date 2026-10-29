@@ -19,10 +19,8 @@ describe("CLI error privacy", () => {
   afterEach(() => fs.rmSync(cwd, { recursive: true, force: true }));
 
   it.each([
-    { env: { MCP_HTTP_PORT: sentinel }, args: ["--transport", "http"] },
-    { env: { MCP_ENV: sentinel }, args: [] },
+    { env: {}, args: ["--transport", "http", "--port", sentinel] },
     { env: {}, args: ["--transport", sentinel] },
-    { env: { MCP_MAX_SESSIONS: sentinel }, args: ["--transport", "http"] },
   ])("does not print invalid setting values or stacks (%#)", ({ env, args }) => {
     const run = spawnSync(process.execPath, [runner, entry, ...args], {
       cwd,

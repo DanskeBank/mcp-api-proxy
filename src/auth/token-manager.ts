@@ -4,6 +4,7 @@ import type { Config } from "../config/config.js";
 import type { EnvironmentAuth, Tier } from "../types/index.js";
 import { buildMtlsAgent } from "./mtls.js";
 import { ProxyError } from "../errors.js";
+import { DEFAULT_TOKEN_SCOPE } from "../config/profiles.js";
 
 export type AuthTier = Exclude<Tier, "mock">;
 
@@ -29,7 +30,7 @@ async function parseTokenResponse(
   } catch {
     throw new ProxyError("auth", {
       tier,
-      hint: "Invalid token response JSON. Check the token URL settings.",
+      hint: "Invalid token response JSON. Check the token endpoint.",
     });
   }
   const parsed = tokenResponseSchema.safeParse(json);
@@ -60,6 +61,16 @@ export interface TokenManagerOptions {
 
 /** Refresh the token this many ms before its declared expiry. */
 const REFRESH_LEAD_MS = 60_000;
+
+/** Guidance for a rejected token request. A user's own TOKEN_SCOPE is never echoed. */
+function rejectedTokenHint(scope: string): string {
+  return scope === DEFAULT_TOKEN_SCOPE
+    ? `The token request was rejected. The proxy requests the scopes "${DEFAULT_TOKEN_SCOPE}"; ` +
+        "if your client is registered for fewer, set TOKEN_SCOPE (for example TOKEN_SCOPE=accounts) and restart the proxy. " +
+        "Otherwise check CLIENT_ID, CLIENT_CERT_PEM and CLIENT_KEY_PEM."
+    : "The token request was rejected. Check CLIENT_ID, CLIENT_CERT_PEM and CLIENT_KEY_PEM, " +
+        "and that your client is registered for the scopes in TOKEN_SCOPE.";
+}
 
 /**
  * Per-tier OAuth2 client_credentials token cache with single-flight de-dup
@@ -111,11 +122,8 @@ export class TokenManager {
     if (!agent) {
       const auth = this.requireAuth(tier);
       // Sandbox and production Premium API hosts both present publicly
-      // trusted certs, so extraCaCertPath is unset there and undici.Agent
-      // falls back to Node's default trust store. A custom non-prod tier's
-      // equivalents of these hosts may be signed by a private CA instead —
-      // point MCP_SERVER_CA_CERT at it to trust them (swap the file when
-      // it's rotated, no code change needed).
+      // trusted certs, so extraCaCertPath is normally unset and undici.Agent
+      // falls back to Node's default trust store. MCP_SERVER_CA_CERT adds a CA bundle.
       agent = this.agentFactory(auth, this.config.extraCaCertPath);
       this.agents.set(tier, agent);
     }
@@ -182,7 +190,12 @@ export class TokenManager {
 
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      throw new ProxyError("auth", { tier, statusCode: response.status });
+      const rejected = response.status >= 400 && response.status < 500;
+      throw new ProxyError("auth", {
+        tier,
+        statusCode: response.status,
+        ...(rejected ? { hint: rejectedTokenHint(this.config.tokenScope) } : {}),
+      });
     }
     const json = await parseTokenResponse(response, tier);
 

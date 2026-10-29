@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
 import type { Config } from "../config/config.js";
@@ -33,24 +32,24 @@ export const callEndpointSchema = z
           "Choose mock or sandbox only when the user asks to test.",
       ),
     queryParams: z
-      .record(z.string())
+      .record(z.string(), z.string())
       .optional()
       .describe("Query string parameters"),
     headers: z
-      .record(z.string())
+      .record(z.string(), z.string())
       .optional()
       .describe(
         "Optional extra headers. Authorization and Content-Type are added automatically — do NOT include them here.",
       ),
     body: z
-      .record(z.unknown())
+      .record(z.string(), z.unknown())
       .optional()
       .describe("Request body for POST/PUT/PATCH"),
   })
   .superRefine((val, ctx) => {
     if (val.body && (val.method === "GET" || val.method === "DELETE")) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         path: ["body"],
         message: `Request body is not allowed for ${val.method} requests.`,
       });
@@ -139,7 +138,7 @@ export function getToolDescription(config: Config): string {
 
 const RECOVERY_STEPS: Record<ErrorCategory, string> = {
   validation: "Check the tool schema and get_endpoint_details, then correct the request before retrying.",
-  auth: "Check client credentials, requested scope (TOKEN_SCOPE) and API access before retrying.",
+  auth: "Check client credentials and API access before retrying. If the token request was rejected, the client may not be registered for every default scope: set TOKEN_SCOPE to the scopes it is registered for (for example accounts) and restart the proxy.",
   not_found: "Use get_endpoint_details to verify the selected tier's base path, operation and resource identifier.",
   rate_limited: "Wait according to the Retry-After response header, then follow the API's retry policy.",
   upstream: "Check connectivity and service availability, then follow the API's retry policy.",
@@ -361,9 +360,8 @@ export async function handleCallEndpoint(
 
 // Generated from `callEndpointSchema` so the wire schema and the runtime
 // validator can never drift. Validated at module load to catch schema drift early.
-const _generatedSchema = zodToJsonSchema(callEndpointSchema, {
-  target: "openApi3",
-  $refStrategy: "none",
+const _generatedSchema = z.toJSONSchema(callEndpointSchema, {
+  target: "openapi-3.0",
 }) as Record<string, unknown>;
 
 if (_generatedSchema.type !== "object") {

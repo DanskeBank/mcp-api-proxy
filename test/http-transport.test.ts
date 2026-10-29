@@ -12,6 +12,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   createHttpSessionHandler,
+  createLoopbackHostCheck,
   createLoopbackOriginCheck,
   type HttpSessionHandlerOptions,
 } from "../src/http-transport.js";
@@ -755,5 +756,47 @@ describe("createLoopbackOriginCheck", () => {
   it("rejects a malformed origin", () => {
     expect(isOk("not-a-url")).toBe(false);
     expect(isOk("")).toBe(true); // empty falsy → treated as missing
+  });
+});
+
+describe("createLoopbackHostCheck", () => {
+  const isOk = createLoopbackHostCheck({ port: 3001 });
+
+  it("allows loopback host names on the configured port, in any letter case", () => {
+    expect(isOk("127.0.0.1:3001")).toBe(true);
+    expect(isOk("localhost:3001")).toBe(true);
+    expect(isOk("LocalHost:3001")).toBe(true);
+    expect(isOk("[::1]:3001")).toBe(true);
+  });
+
+  it("rejects a missing or empty Host header", () => {
+    expect(isOk(undefined)).toBe(false);
+    expect(isOk("")).toBe(false);
+  });
+
+  it.each([
+    "evil.example:3001",
+    "evil.example",
+    "localhost.evil.example:3001",
+    "127.0.0.1.evil.example:3001",
+    "evil.example:3001, localhost:3001",
+    "10.0.0.1:3001",
+    "0.0.0.0:3001",
+  ])("rejects a rebound or non-loopback host %j", (host) => {
+    expect(isOk(host)).toBe(false);
+  });
+
+  it("rejects loopback on a different port, or without a port", () => {
+    expect(isOk("127.0.0.1:8080")).toBe(false);
+    expect(isOk("localhost")).toBe(false);
+    expect(isOk("[::1]")).toBe(false);
+  });
+
+  it("accepts a bare loopback name only for port 80, where the Host header omits the port", () => {
+    const onPort80 = createLoopbackHostCheck({ port: 80 });
+    expect(onPort80("localhost")).toBe(true);
+    expect(onPort80("127.0.0.1:80")).toBe(true);
+    expect(onPort80("evil.example")).toBe(false);
+    expect(createLoopbackHostCheck({ port: 8080 })("localhost")).toBe(false);
   });
 });

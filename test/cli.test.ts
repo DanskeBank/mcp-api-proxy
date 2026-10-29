@@ -59,26 +59,25 @@ describe("CLI --settings-file", () => {
   }
 
   it("loads the settings file from another working directory without printing its values", () => {
-    const file = writeSettings(
-      "MCP_HTTP_PORT=settings-file-probe\nCLIENT_KEY_PASSPHRASE=sentinel-passphrase-123\n",
-    );
-    const run = runCli(["--transport", "http", "--settings-file", file]);
+    const file = writeSettings("CLIENT_KEY_PASSPHRASE=sentinel-passphrase-123\n");
+    // An invalid port stops startup before anything binds or connects.
+    const run = runCli(["--transport", "http", "--port", "not-a-port", "--settings-file", file]);
 
     expect(run.status).toBe(1);
     expect(run.stderr).toContain(`[proxy] settings loaded from ${file}`);
-    expect(run.stderr).toContain("[configuration]: Invalid MCP_HTTP_PORT.");
+    expect(run.stderr).toContain("[configuration]: Invalid --port.");
     expect(run.stdout).toBe("");
-    expect(run.stderr).not.toContain("settings-file-probe");
+    expect(run.stderr).not.toContain("not-a-port");
     expect(run.stderr).not.toContain("sentinel-passphrase-123");
   }, 30_000);
 
   it("expands a literal ~/ path to the home directory", () => {
-    const file = writeSettings("MCP_HTTP_PORT=home-probe\n");
-    const run = runCli(["--transport", "http", "--settings-file", "~/danske-proxy.env"]);
+    const file = writeSettings("CLIENT_KEY_PASSPHRASE=home-probe\n");
+    const run = runCli(["--transport", "http", "--port", "0", "--settings-file", "~/danske-proxy.env"]);
 
     expect(run.status).toBe(1);
     expect(run.stderr).toContain(`[proxy] settings loaded from ${file}`);
-    expect(run.stderr).toContain("[configuration]: Invalid MCP_HTTP_PORT.");
+    expect(run.stderr).toContain("[configuration]: Invalid --port.");
     expect(run.stderr).not.toContain("home-probe");
   }, 30_000);
 
@@ -95,31 +94,71 @@ describe("CLI --settings-file", () => {
     expect(run.stdout).toBe("");
   }, 30_000);
 
-  it("reads the HTTP port from the settings file in HTTP mode", () => {
-    // An invalid port stops startup before anything binds or connects.
-    const file = writeSettings("MCP_HTTP_PORT=not-a-port\n");
-    const run = runCli(["--transport", "http", "--settings-file", file]);
+  it.each(["not-a-port", "0", "65536", "80abc", "1e3", "-1"])(
+    "rejects --port %s without echoing it",
+    (value) => {
+      const run = runCli(["--transport", "http", "--port", value]);
+
+      expect(run.status).toBe(1);
+      expect(run.stderr).toContain(
+        "[configuration]: Invalid --port. Must be an integer between 1 and 65535.",
+      );
+      expect(run.stderr).not.toContain(value);
+      expect(run.stdout).toBe("");
+    },
+    30_000,
+  );
+
+  it.each([["--port"], ["--port", "--host", "127.0.0.1"], ["--host"], ["--host="]])(
+    "names a missing --port or --host value (%j)",
+    (...flags) => {
+      const run = runCli(["--transport", "http", ...flags]);
+
+      expect(run.status).toBe(1);
+      expect(run.stderr).toMatch(/\[configuration\]: --(port|host) needs a value/);
+      expect(run.stderr).not.toContain("\n    at ");
+      expect(run.stdout).toBe("");
+    },
+    30_000,
+  );
+
+  it("names --host and --port when the listener cannot start, without printing the host", () => {
+    // 192.0.2.0/24 is reserved for documentation, so no local interface owns it.
+    const run = runCli(["--transport", "http", "--host", "192.0.2.123", "--port", "3999"]);
 
     expect(run.status).toBe(1);
-    expect(run.stderr).toContain("[configuration]: Invalid MCP_HTTP_PORT.");
-    expect(run.stderr).not.toContain("not-a-port");
+    expect(run.stderr).toContain(
+      "[http] [configuration] Cannot start the HTTP listener. Check --host and --port.",
+    );
+    expect(run.stderr).toContain("[http] Host header check skipped: --host is not a loopback address");
+    expect(run.stderr).not.toContain("192.0.2.123");
     expect(run.stdout).toBe("");
   }, 30_000);
 
+  /** Runs `use` while a local server occupies a port, so HTTP startup stops at the listener. */
+  async function withOccupiedPort(use: (port: number) => void | Promise<void>): Promise<void> {
+    const occupied = createServer();
+    await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = occupied.address();
+      if (!address || typeof address === "string") throw new Error("Expected a TCP address");
+      await use(address.port);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        occupied.close((error) => error ? reject(error) : resolve()),
+      );
+    }
+  }
+
   it.each([false, true])(
     "reports tiers before the first HTTP session, with partial credentials: %s",
-    async (partial) => {
-      const occupied = createServer();
-      await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", resolve));
-      try {
-        const address = occupied.address();
-        if (!address || typeof address === "string") throw new Error("Expected a TCP address");
+    (partial) =>
+      withOccupiedPort((port) => {
         const sentinel = "private-http-startup-8675309";
         const file = writeSettings(
-          `MCP_ENV=prod\nMCP_HTTP_PORT=${address.port}\n` +
-          (partial ? `CLIENT_ID=${sentinel}\n` : ""),
+          "MCP_ENV=prod\n" + (partial ? `CLIENT_ID=${sentinel}\n` : ""),
         );
-        const run = runCli(["--transport", "http", "--settings-file", file]);
+        const run = runCli(["--transport", "http", "--port", String(port), "--settings-file", file]);
 
         expect(run.error).toBeUndefined();
         expect(run.status).toBe(1);
@@ -129,28 +168,39 @@ describe("CLI --settings-file", () => {
         expect(run.stderr.includes("incomplete sandbox authentication")).toBe(partial);
         expect(run.stderr).not.toContain(sentinel);
         expect(run.stderr).not.toContain("upstream connect");
-      } finally {
-        await new Promise<void>((resolve, reject) =>
-          occupied.close((error) => error ? reject(error) : resolve()),
-        );
-      }
-    },
+      }),
     30_000,
   );
 
-  it.each([
-    "MCP_MAX_SESSIONS",
-    "MCP_SESSION_TTL_MS",
-    "MCP_RATE_LIMIT_PER_IP",
-    "MCP_RATE_LIMIT_WINDOW_MS",
-  ])("names %s without exposing its invalid value", (name) => {
-    const file = writeSettings(`${name}=private-setting-value-123\n`);
-    const run = runCli(["--transport", "http", "--settings-file", file]);
+  it("ignores settings that are no longer supported, naming them without their values", () =>
+    withOccupiedPort((port) => {
+      const file = writeSettings(
+        "MCP_ENV=prod\nMCP_SERVER_URL=https://private-host.invalid/mcp\n" +
+        "MCP_HTTP_PORT=1\nMCP_MAX_SESSIONS=private-setting-value-123\n",
+      );
+      const run = runCli(["--transport", "http", "--port", String(port), "--settings-file", file]);
+
+      expect(run.status).toBe(1);
+      expect(run.stderr).toContain(
+        "[proxy] ignoring settings that are no longer supported: MCP_SERVER_URL, MCP_HTTP_PORT, MCP_MAX_SESSIONS.",
+      );
+      expect(run.stderr).toContain("env=prod upstream=https://mcp.danskebank.com/");
+      expect(run.stderr).toContain("Cannot start the HTTP listener. Check --host and --port.");
+      expect(run.stderr).not.toContain("private-host.invalid");
+      expect(run.stderr).not.toContain("private-setting-value-123");
+      expect(run.stdout).toBe("");
+    }),
+    30_000,
+  );
+
+  it("does not load the .env of the working directory, and says so", () => {
+    fs.writeFileSync(path.join(cwd, ".env"), "CLIENT_KEY_PASSPHRASE=private-dotenv-123\n");
+    const run = runCli(["--transport", "http", "--port", "0"]);
 
     expect(run.status).toBe(1);
-    expect(run.stderr).toContain(`[configuration]: Invalid ${name}.`);
-    expect(run.stderr).not.toContain("private-setting-value-123");
-    expect(run.stdout).toBe("");
+    expect(run.stderr).toContain("the .env file in the working directory is not loaded");
+    expect(run.stderr).not.toContain("settings loaded");
+    expect(run.stderr).not.toContain("private-dotenv-123");
   }, 30_000);
 
   it("names a missing settings-file argument without printing a stack trace", () => {
@@ -187,21 +237,23 @@ describe("CLI --settings-file", () => {
     const address = http.address();
     if (!address || typeof address === "string") throw new Error("Expected a TCP address");
     const apiKey = "synthetic-catalog-key";
-    const file = writeSettings(
-      `MCP_ENV=test\nMCP_SERVER_URL=http://127.0.0.1:${address.port}/mcp\n` +
-      `MCP_API_HOST_MOCK=mock.example.test\nMCP_SERVER_API_KEY=${apiKey}\n`,
-    );
+    const file = writeSettings(`MCP_ENV=prod\nMCP_SERVER_API_KEY=${apiKey}\n`);
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [
         "--import",
         new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url).href,
+        "--import",
+        new URL("./fixtures/redirect-upstream.ts", import.meta.url).href,
         ENTRY,
         "--settings-file",
         file,
       ],
       cwd,
-      env: cliEnvironment(home),
+      env: {
+        ...cliEnvironment(home),
+        TEST_UPSTREAM_URL: `http://127.0.0.1:${address.port}/mcp`,
+      },
       stderr: "pipe",
     });
     let stderr = "";

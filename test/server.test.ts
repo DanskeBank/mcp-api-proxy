@@ -31,16 +31,15 @@ vi.mock("../src/clients/mcp-client.js", () => {
 
 import { createServer } from "../src/server.js";
 import type { Config } from "../src/config/config.js";
+import { ProxyError } from "../src/errors.js";
 import { getToolDescription } from "../src/tools/call-endpoint.js";
 import { PACKAGE_VERSION } from "../src/version.js";
 
 const ENV_KEYS = [
   "MCP_ENV",
-  "MCP_SERVER_URL",
   "CLIENT_ID",
   "CLIENT_CERT_PEM",
   "CLIENT_KEY_PEM",
-  "TOKEN_SCOPE",
 ];
 
 function programmaticConfig(): Config {
@@ -165,6 +164,33 @@ describe("createServer({ config })", () => {
     }
   });
 
+  it("reports a missing hosted MCP server API key at startup", async () => {
+    const handle = await createServer({ config: programmaticConfig() });
+
+    try {
+      const calls = vi.mocked(console.error).mock.calls.map((args) => format(...args)).join("\n");
+      expect(calls).toContain("mcp-api-key=missing");
+      expect(calls).not.toContain("mcp-api-key=on");
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("reports a configured hosted MCP server API key without its value", async () => {
+    const handle = await createServer({
+      config: { ...programmaticConfig(), mcpServerApiKey: "private-api-key-8675309" },
+    });
+
+    try {
+      const calls = vi.mocked(console.error).mock.calls.map((args) => format(...args)).join("\n");
+      expect(calls).toContain("mcp-api-key=on");
+      expect(calls).not.toContain("mcp-api-key=missing");
+      expect(calls).not.toContain("private-api-key-8675309");
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("reports when the fallback default has no usable host", async () => {
     const config = programmaticConfig();
     config.apiHosts = { mock: "" };
@@ -211,6 +237,88 @@ describe("createServer({ config })", () => {
     } finally {
       await handle.close();
       fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { category: "auth", hint: "The hosted MCP server rejected MCP_SERVER_API_KEY. Check the key." },
+    { category: "rate_limited", hint: "Too many invalid API key attempts. Wait, then restart the proxy." },
+  ] as const)(
+    "reports a $category upstream refusal once, without retrying, to the user and the agent",
+    async ({ category, hint }) => {
+      const key = "private-api-key-8675309";
+      connect.mockRejectedValue(new ProxyError(category, { hint }));
+      const handle = await createServer({ config: { ...programmaticConfig(), mcpServerApiKey: key } });
+      const client = new Client({ name: "key-test", version: "1.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+      try {
+        await handle.server.connect(serverTransport);
+        await client.connect(clientTransport);
+        expect(handle.mcpClient).toBeNull();
+        expect(connect).toHaveBeenCalledTimes(1);
+
+        const calls = vi.mocked(console.error).mock.calls.map((args) => format(...args)).join("\n");
+        expect(calls).toContain(`[${category}]`);
+        expect(calls).toContain(hint);
+        expect(calls).not.toContain("connect attempt");
+        expect(calls).not.toContain(key);
+
+        expect(client.getInstructions()).toContain(hint);
+        const result = await client.callTool({ name: "search_apis", arguments: {} });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain(hint);
+      } finally {
+        await client.close();
+        await handle.close();
+      }
+    },
+  );
+
+  it("keeps retrying other connection failures and adds no instructions for them", async () => {
+    vi.useFakeTimers();
+    connect.mockRejectedValue(new Error("connection reset"));
+    const creation = createServer({ config: programmaticConfig() });
+    await vi.runAllTimersAsync();
+    const handle = await creation;
+    const client = new Client({ name: "retry-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    try {
+      await handle.server.connect(serverTransport);
+      await client.connect(clientTransport);
+      expect(connect).toHaveBeenCalledTimes(3);
+      expect(client.getInstructions()).toBeUndefined();
+    } finally {
+      await client.close();
+      await handle.close();
+    }
+  });
+
+  it("tells the agent about a temporary key verification failure once the retries are used up", async () => {
+    vi.useFakeTimers();
+    const hint = "The hosted MCP server could not verify the API key right now.";
+    connect.mockRejectedValue(new ProxyError("upstream", { hint }));
+    const creation = createServer({ config: programmaticConfig() });
+    await vi.runAllTimersAsync();
+    const handle = await creation;
+    const client = new Client({ name: "transient-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    try {
+      await handle.server.connect(serverTransport);
+      await client.connect(clientTransport);
+      expect(connect).toHaveBeenCalledTimes(3);
+      expect(client.getInstructions()).toContain(hint);
+
+      const result = await client.callTool({ name: "search_apis", arguments: {} });
+      expect(result.isError).toBe(true);
+      expect(result._meta).toEqual({ errorCategory: "upstream" });
+      expect(JSON.stringify(result.content)).toContain(hint);
+      expect(JSON.stringify(result.content)).not.toContain("not connected");
+    } finally {
+      await client.close();
+      await handle.close();
     }
   });
 

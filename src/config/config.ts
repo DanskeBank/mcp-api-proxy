@@ -4,18 +4,27 @@ import path from "node:path";
 import { parse as parseDotenv } from "dotenv";
 import type { EnvironmentAuth } from "../types/index.js";
 import { ProxyError } from "../errors.js";
+import {
+  DEFAULT_TOKEN_SCOPE,
+  extraProfiles,
+  hasExtraProfiles,
+  resolveProfile,
+  supportedEnvs,
+  type EnvProfile,
+  type ExtraProfiles,
+  type TierEndpoints,
+} from "./profiles.js";
 
-// "prod" gets built-in hosts; any other value (including none) is treated
-// as a custom non-prod tier and just needs MCP_SERVER_URL / MCP_API_HOST_*.
-// Kept as a named alias (not inlined `string`) for public API readability.
+// Names a profile in profiles.ts. Kept as a named alias (not inlined `string`)
+// for public API readability.
 export type Environment = string; // NOSONAR: intentional alias, not redundant
 
 export interface ApiHosts {
   /** Mock host — no auth required, all methods allowed. Always present. */
   mock: string;
-  /** Sandbox host — auth required, all methods allowed. Only present in MCP_ENV=prod. */
+  /** Sandbox host — auth required, all methods allowed. Only present where the environment has a sandbox tier that can authenticate. */
   sandbox?: string;
-  /** Live host — auth required, GET only. Present in prod, or any non-prod tier that sets MCP_API_HOST_LIVE. */
+  /** Live host — auth required, GET only. Present where the environment has a live tier that can authenticate. */
   live?: string;
 }
 
@@ -30,7 +39,7 @@ export interface Config {
   mcpServerApiKey?: string;
   /** API Connect hostnames for the active environment */
   apiHosts: ApiHosts;
-  /** OAuth2 scope — selects the Premium API product (e.g. "accounts") */
+  /** OAuth2 scope: a space-delimited list of the Premium API products (default "accounts payments", narrowed with TOKEN_SCOPE) */
   tokenScope: string;
   /** OAuth2 client ID from Developer Portal. Required for any auth tier. */
   clientId?: string;
@@ -38,45 +47,6 @@ export interface Config {
   sandbox?: EnvironmentAuth;
   /** Live-tier auth (set when CLIENT_CERT_PEM + CLIENT_KEY_PEM are provided and env has a live tier) */
   live?: EnvironmentAuth;
-}
-
-interface EnvDefaults {
-  mcpServerUrl: string;
-  extraCaCertPath?: string;
-  apiHosts: ApiHosts;
-  /** OAuth2 token endpoint for the sandbox API tier (only when sandbox host exists). */
-  sandboxTokenUrl?: string;
-  /** OAuth2 token endpoint for the live API tier. */
-  liveTokenUrl?: string;
-}
-
-// Only "prod" has built-in hosts. Any other MCP_ENV value is a custom,
-// non-prod tier — set MCP_SERVER_URL and MCP_API_HOST_* (plus
-// LIVE_TOKEN_URL) to point it at your own environment.
-const PROD_DEFAULTS: EnvDefaults = {
-  mcpServerUrl: "https://mcp.danskebank.com/mcp",
-  // Production uses a publicly trusted certificate — no extra CA needed.
-  apiHosts: {
-    mock: "mock-api.danskebank.com",
-    sandbox: "sandbox-api.danskebank.com",
-    live: "api.danskebank.com",
-  },
-  // All Premium APIs except the Payment Collection API, which uses .../fi/business/oauth2/token.
-  sandboxTokenUrl:
-    "https://sandbox-api.danskebank.com/sandbox-corporate/api/dk/business/oauth2/token",
-  liveTokenUrl: "https://api.danskebank.com/corporate/api/dk/business/oauth2/token",
-};
-
-const NON_PROD_DEFAULTS: EnvDefaults = {
-  mcpServerUrl: "",
-  // No bundled CA — a custom non-prod tier's TLS trust for API Connect must
-  // be supplied explicitly via MCP_SERVER_CA_CERT, same as CLIENT_CERT_PEM.
-  apiHosts: { mock: "" },
-};
-
-function parseEnv(value: string | undefined): Environment {
-  if (value === "prod" || value === "production") return "prod";
-  return value || "test";
 }
 
 // Not --env-file: Node intercepts that flag anywhere in argv, even after the script name.
@@ -101,27 +71,41 @@ function settingsFileArg(argv: readonly string[]): string | undefined {
   return value;
 }
 
+/** An unreadable `.env` (for example a symlink loop) is not worth stopping the proxy for. */
+function hasWorkspaceDotenv(cwd: string): boolean {
+  try {
+    return fs.statSync(path.join(cwd, ".env")).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Loads settings into `process.env` before `getConfig` reads them: the file
- * given with `--settings-file`, otherwise `.env` in `cwd` when it can be read.
- * Variables that are already set win over the file. Returns the path of the
- * loaded file.
+ * Loads the file given with `--settings-file` into `process.env` before
+ * `getConfig` reads it. Variables that are already set win over the file.
+ * Nothing is read implicitly: a `.env` in the working directory belongs to the
+ * workspace the client launched the proxy from, not to the user. Returns the
+ * path of the loaded file.
  */
 export function loadSettingsFile(
   argv: readonly string[],
   cwd: string = process.cwd(),
 ): string | undefined {
   const requested = settingsFileArg(argv);
-  const file = requested
-    ? path.resolve(cwd, requested.replace(/^~(?=$|[\\/])/, os.homedir()))
-    : path.join(cwd, ".env");
+  if (!requested) {
+    if (hasWorkspaceDotenv(cwd)) {
+      console.error(
+        "[proxy] the .env file in the working directory is not loaded. Pass --settings-file <path> to use it.",
+      );
+    }
+    return undefined;
+  }
+  const file = path.resolve(cwd, requested.replace(/^~(?=$|[\\/])/, os.homedir()));
 
   let content: Buffer;
   try {
     content = fs.readFileSync(file);
   } catch (err) {
-    // Only a file the user asked for is required; a missing or unreadable .env (or a .env folder) is skipped.
-    if (!requested) return undefined;
     const code = (err as NodeJS.ErrnoException).code;
     const codeSuffix = code ? ` (${code})` : "";
     throw new ProxyError("configuration", {
@@ -136,105 +120,142 @@ export function loadSettingsFile(
   return file;
 }
 
-function warnIncompleteAuth(
-  apiHosts: ApiHosts,
-  tokenUrls: { sandbox?: string; live?: string },
-): void {
+// Hosts and token endpoints now come from the environment profile, and
+// the HTTP listener is set with --port and --host.
+const REMOVED_SETTINGS = [
+  "MCP_SERVER_URL",
+  "MCP_API_HOST_MOCK",
+  "MCP_API_HOST_SANDBOX",
+  "MCP_API_HOST_LIVE",
+  "SANDBOX_TOKEN_URL",
+  "LIVE_TOKEN_URL",
+  "MCP_HTTP_PORT",
+  "MCP_HTTP_HOST",
+  "MCP_MAX_SESSIONS",
+  "MCP_SESSION_TTL_MS",
+  "MCP_RATE_LIMIT_PER_IP",
+  "MCP_RATE_LIMIT_WINDOW_MS",
+  "MCP_TRUST_PROXY",
+] as const;
+
+/** Names, never values, of settings that are set but no longer have any effect. */
+export function warnRemovedSettings(extra: ExtraProfiles = extraProfiles): void {
+  const ignored = REMOVED_SETTINGS.filter((name) => process.env[name] !== undefined);
+  if (ignored.length > 0) {
+    console.error(
+      `[proxy] ignoring settings that are no longer supported: ${ignored.join(", ")}. ` +
+        "Hosts and token endpoints are built into the package; use --port and --host for the HTTP listener.",
+    );
+  }
+  const env = process.env.MCP_ENV;
+  if (!hasExtraProfiles(extra) && env && env !== "prod" && env !== "production") {
+    console.error("[proxy] MCP_ENV is ignored: this package supports production only.");
+  }
+}
+
+function warnIncompleteAuth(profile: EnvProfile): void {
   const credentialNames = ["CLIENT_ID", "CLIENT_CERT_PEM", "CLIENT_KEY_PEM"] as const;
   const hasCredentials =
     credentialNames.some((name) => Boolean(process.env[name])) ||
     Boolean(process.env.CLIENT_KEY_PASSPHRASE);
+  if (!hasCredentials) return;
 
-  if (hasCredentials && !apiHosts.sandbox && !apiHosts.live) {
+  const tiers = (["sandbox", "live"] as const).filter((tier) => profile[tier]);
+  if (tiers.length === 0) {
     console.error(
-      "[proxy] authentication settings are unused: configure MCP_API_HOST_SANDBOX or MCP_API_HOST_LIVE and its token URL.",
+      "[proxy] authentication settings are unused: this environment has no sandbox or live tier.",
     );
+    return;
   }
 
-  for (const tier of ["sandbox", "live"] as const) {
-    const tokenName = `${tier.toUpperCase()}_TOKEN_URL`;
-    if (!process.env[tokenName] && (!hasCredentials || !apiHosts[tier])) continue;
-
-    const missing: string[] = credentialNames.filter((name) => !process.env[name]);
-    if (!apiHosts[tier]) missing.push(`MCP_API_HOST_${tier.toUpperCase()}`);
-    if (!tokenUrls[tier]) missing.push(tokenName);
-    if (missing.length > 0) {
-      const label = tier === "sandbox" ? "Sandbox" : "Live";
+  const missing = credentialNames.filter((name) => !process.env[name]);
+  for (const tier of tiers) {
+    const label = tier === "sandbox" ? "Sandbox" : "Live";
+    if (!profile[tier]?.tokenUrl) {
+      console.error(
+        `[proxy] ${tier} authentication is not available in this environment. ${label} calls are unavailable.`,
+      );
+    } else if (missing.length > 0) {
       console.error(
         `[proxy] incomplete ${tier} authentication: missing ${missing.join(", ")}. ${label} calls are unavailable.`,
       );
     }
   }
+
+  // Private keys are normally encrypted, so sign-in is likely to fail without
+  // the passphrase. Only a warning: an unencrypted key works without one.
+  const canAuthenticate = tiers.some((tier) => profile[tier]?.tokenUrl);
+  if (canAuthenticate && missing.length === 0 && !process.env.CLIENT_KEY_PASSPHRASE) {
+    console.error(
+      "[proxy] CLIENT_KEY_PASSPHRASE is not set. Authentication fails if your private key is encrypted, which is the usual case.",
+    );
+  }
+}
+
+/**
+ * The scopes to request: `TOKEN_SCOPE` for a client registered for fewer
+ * products than the default covers. It can only narrow what is requested; it
+ * cannot redirect credentials. Blank counts as unset.
+ */
+function tokenScopeFromEnv(): string {
+  const scopes = process.env.TOKEN_SCOPE?.split(/\s+/).filter(Boolean);
+  return scopes?.length ? scopes.join(" ") : DEFAULT_TOKEN_SCOPE;
 }
 
 export function getConfig(): Config {
-  const env = parseEnv(process.env.MCP_ENV);
-  const defaults = env === "prod" ? PROD_DEFAULTS : NON_PROD_DEFAULTS;
+  return configFor(extraProfiles);
+}
 
-  const mcpServerUrl = process.env.MCP_SERVER_URL ?? defaults.mcpServerUrl;
-  const sandboxHost =
-    process.env.MCP_API_HOST_SANDBOX ?? defaults.apiHosts.sandbox;
-  const liveHost = process.env.MCP_API_HOST_LIVE ?? defaults.apiHosts.live;
-  const apiHosts: ApiHosts = {
-    mock: process.env.MCP_API_HOST_MOCK ?? defaults.apiHosts.mock,
-    ...(sandboxHost ? { sandbox: sandboxHost } : {}),
-    ...(liveHost ? { live: liveHost } : {}),
-  };
-
-  if (!mcpServerUrl || !apiHosts.mock) {
-    throw new ProxyError("configuration", { hint:
-      "MCP_ENV has no built-in hosts. Set MCP_SERVER_URL and " +
-        `MCP_API_HOST_MOCK (plus MCP_API_HOST_LIVE and LIVE_TOKEN_URL to call ` +
-        `real APIs), or use MCP_ENV=prod, which needs no host configuration.`,
+/** `getConfig` for a given set of extra profiles, so both kinds of build can be tested. */
+export function configFor(extra: ExtraProfiles): Config {
+  const resolved = resolveProfile(process.env.MCP_ENV, extra);
+  if (!resolved) {
+    throw new ProxyError("configuration", {
+      hint: `Invalid MCP_ENV. Supported: ${supportedEnvs(extra).join(", ")}.`,
     });
   }
+  const { env, profile } = resolved;
+
+  warnIncompleteAuth(profile);
 
   const clientId = process.env.CLIENT_ID;
-
   // Single set of mTLS credentials shared by both sandbox and live tiers.
   const clientCert = process.env.CLIENT_CERT_PEM;
   const clientKey = process.env.CLIENT_KEY_PEM;
   const clientKeyPassphrase = process.env.CLIENT_KEY_PASSPHRASE;
 
-  const sandboxTokenUrl =
-    process.env.SANDBOX_TOKEN_URL ?? defaults.sandboxTokenUrl;
-  const liveTokenUrl = process.env.LIVE_TOKEN_URL ?? defaults.liveTokenUrl;
-
-  warnIncompleteAuth(apiHosts, { sandbox: sandboxTokenUrl, live: liveTokenUrl });
+  const credentials =
+    clientId && clientCert && clientKey
+      ? {
+          certPath: clientCert,
+          keyPath: clientKey,
+          ...(clientKeyPassphrase ? { keyPassphrase: clientKeyPassphrase } : {}),
+        }
+      : undefined;
+  const authFor = (tier?: TierEndpoints): EnvironmentAuth | undefined =>
+    credentials && tier?.tokenUrl
+      ? { ...credentials, tokenUrl: tier.tokenUrl }
+      : undefined;
+  const sandbox = authFor(profile.sandbox);
+  const live = authFor(profile.live);
 
   return {
     env,
-    mcpServerUrl,
-    extraCaCertPath: process.env.MCP_SERVER_CA_CERT ?? defaults.extraCaCertPath,
+    mcpServerUrl: profile.mcpServerUrl,
+    // Optional: trust an additional CA bundle.
+    ...(process.env.MCP_SERVER_CA_CERT
+      ? { extraCaCertPath: process.env.MCP_SERVER_CA_CERT }
+      : {}),
     mcpServerApiKey: process.env.MCP_SERVER_API_KEY,
-    apiHosts,
-    // TODO: single scope per process for now (testing). Revisit when one
-    // proxy instance must serve multiple Premium products simultaneously.
-    tokenScope: process.env.TOKEN_SCOPE ?? "accounts",
+    // A tier without a token endpoint cannot authenticate, so its host is not offered.
+    apiHosts: {
+      mock: profile.mockHost,
+      ...(profile.sandbox?.tokenUrl ? { sandbox: profile.sandbox.host } : {}),
+      ...(profile.live?.tokenUrl ? { live: profile.live.host } : {}),
+    },
+    tokenScope: tokenScopeFromEnv(),
     clientId,
-    ...(clientId && clientCert && clientKey && sandboxTokenUrl
-      ? {
-          sandbox: {
-            certPath: clientCert,
-            keyPath: clientKey,
-            ...(clientKeyPassphrase
-              ? { keyPassphrase: clientKeyPassphrase }
-              : {}),
-            tokenUrl: sandboxTokenUrl,
-          },
-        }
-      : {}),
-    ...(clientId && clientCert && clientKey && liveTokenUrl
-      ? {
-          live: {
-            certPath: clientCert,
-            keyPath: clientKey,
-            ...(clientKeyPassphrase
-              ? { keyPassphrase: clientKeyPassphrase }
-              : {}),
-            tokenUrl: liveTokenUrl,
-          },
-        }
-      : {}),
+    ...(sandbox ? { sandbox } : {}),
+    ...(live ? { live } : {}),
   };
 }

@@ -8,7 +8,7 @@
 This guide gets you from nothing to chatting with an AI assistant about Danske Bank APIs. You will:
 
 1. [Install the prerequisites](#step-1--prerequisites)
-2. [Install the proxy](#step-2--install-the-proxy)
+2. [Get the proxy](#step-2--get-the-proxy)
 3. [Connect it to your AI client](#step-3--connect-your-ai-client)
 4. [Try it out](#step-4--try-it-out)
 5. (Optional) [Add credentials to call real APIs](#step-5--calling-real-apis-optional)
@@ -49,21 +49,23 @@ Your client certificate and private key never leave your machine.
 
 ---
 
-## Step 2 — Install the proxy
+## Step 2 — Get the proxy
 
-Open a terminal:
+There is nothing to install. The configurations in Step 3 start the proxy with `npx -y @danskebank/mcp-api-proxy@latest`: your AI client runs it, and `npx` (which comes with Node.js) downloads it on the first start. That first start needs access to the npm registry and can take a little longer.
 
-- In Visual Studio Code: menu bar **Terminal > New Terminal**.
-- On Windows: the **Command Prompt** or **PowerShell** app.
-- On macOS: the **Terminal** app (in Applications > Utilities).
+`@latest` makes every start use the newest published release, even if an older copy is already installed on your machine. To keep one version instead, replace `latest` with a version number.
 
-Then type or paste the following command and press Enter:
+`-y` answers npx's "Ok to proceed?" prompt for you. An AI client starts the proxy without a terminal, so without it the start would wait for an answer.
+
+Optional: to run offline or to keep one version, install the proxy yourself and use `danske-mcp-proxy` as the `command` (with no `args`, or only the proxy's options) instead of `npx`:
 
 ```bash
 npm install -g @danskebank/mcp-api-proxy
 ```
 
-This installs the `danske-mcp-proxy` command. To avoid a global install, you can skip this step entirely and use `npx @danskebank/mcp-api-proxy` in the configuration below instead — your AI client will download and run it automatically, no terminal needed.
+A global install does not update itself. To update it, run `npm install -g @danskebank/mcp-api-proxy@latest`.
+
+If your client still runs an older version than you expect, restart the server in your client. If it still does, delete the `_npx` folder inside the folder that `npm config get cache` prints.
 
 ---
 
@@ -71,23 +73,26 @@ This installs the `danske-mcp-proxy` command. To avoid a global install, you can
 
 Get your key from the [MCP API-key page](https://developers.danskebank.com/mcp/apikey),
 then replace `your-mcp-api-key` in the examples with it.
-The hosted catalog cannot be reached without a valid key. Never commit
-configuration containing the real key.
+The hosted catalog cannot be reached without a valid key. A personal
+configuration file is not a secret store: keep it out of your projects, never
+commit it, or keep the key in a private settings file instead (Step 6).
 
 ### Visual Studio Code
 
-Run **MCP: Add Server** from the Command Palette and choose **Command (stdio)**.
-For the VS Code-specific format below, use `.vscode/mcp.json` in your project,
-or run **MCP: Open User Configuration** for the VS Code user-profile `mcp.json`.
-Do not paste an `mcp` wrapper into general user settings. Portable configurations
-use a different root key; see the [VS Code MCP configuration guide](https://code.visualstudio.com/docs/agent-customization/mcp-servers).
+1. Open the Command Palette (**Ctrl+Shift+P**, on macOS **Cmd+Shift+P**) and run **MCP: Add Server**.
+2. Choose **Command (stdio)** and enter `npx -y @danskebank/mcp-api-proxy@latest`.
+3. Enter the server ID `danske-bank-apis`.
+4. Select **Global**, then **Copilot Global**. This stores the server in `.copilot/mcp-config.json` in your home folder, outside any project. If **Copilot Global** is not offered, see VS Code's [Copilot harness requirements](https://code.visualstudio.com/docs/agents/run/agent-harnesses#_copilot).
+5. Open that file and add your key. If it already lists other servers, add `danske-bank-apis` next to them:
 
 ```jsonc
 {
-  "servers": {
+  "mcpServers": {
     "danske-bank-apis": {
+      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@danskebank/mcp-api-proxy"],
+      "args": ["-y", "@danskebank/mcp-api-proxy@latest"],
+      "tools": ["*"],
       "env": {
         "MCP_SERVER_API_KEY": "your-mcp-api-key",
       },
@@ -96,7 +101,9 @@ use a different root key; see the [VS Code MCP configuration guide](https://code
 }
 ```
 
-Then open the Chat view, switch the mode selector to **Agent**, and confirm `danske-bank-apis` appears under **Tools**.
+Then start an agent session in the Chat view and confirm that tools such as `get_filters` and `search_apis` appear for `danske-bank-apis`.
+
+**Older VS Code format.** `.vscode/mcp.json` and the user-profile `mcp.json` use a `servers` object instead of `mcpServers`. VS Code still reads them but labels them deprecated, so prefer the steps above. See VS Code's [MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration).
 
 ### Claude Desktop
 
@@ -107,7 +114,7 @@ Add to your config file — `~/Library/Application Support/Claude/claude_desktop
   "mcpServers": {
     "danske-bank-apis": {
       "command": "npx",
-      "args": ["-y", "@danskebank/mcp-api-proxy"],
+      "args": ["-y", "@danskebank/mcp-api-proxy@latest"],
       "env": {
         "MCP_SERVER_API_KEY": "your-mcp-api-key",
       },
@@ -117,6 +124,16 @@ Add to your config file — `~/Library/Application Support/Claude/claude_desktop
 ```
 
 Restart Claude Desktop afterwards.
+
+### Claude Code
+
+Run this in a terminal. Everything after `--` is the command that starts the proxy:
+
+```bash
+claude mcp add danske-bank-apis --env MCP_SERVER_API_KEY=your-mcp-api-key -- npx -y @danskebank/mcp-api-proxy@latest
+```
+
+Run `claude mcp list` to confirm that `danske-bank-apis` is connected. Claude Code stores the key in its own configuration; to keep it out, use a settings file (Step 6).
 
 ### Any other client (HTTP)
 
@@ -130,12 +147,12 @@ MCP_SERVER_API_KEY=your-mcp-api-key
 Then start the proxy with that file:
 
 ```bash
-danske-mcp-proxy --transport http --settings-file /absolute/path/to/danske-proxy.env
+npx -y @danskebank/mcp-api-proxy@latest --transport http --settings-file /absolute/path/to/danske-proxy.env
 ```
 
-Point your client at `http://127.0.0.1:3001/mcp`.
+Point your client at `http://127.0.0.1:3001/mcp`. Use `--port` to listen on another port.
 
-One HTTP proxy uses one bank credential set and OAuth scope for all callers.
+One HTTP proxy uses one bank credential set for all callers.
 Authenticating callers in your own wrapper does not isolate bank credentials
 per customer; use separate instances for separate tenants
 ([details](README.md#http)).
@@ -167,18 +184,17 @@ Then add them to the `env` block of your client configuration:
 
 ```jsonc
 {
-  "servers": {
+  "mcpServers": {
     "danske-bank-apis": {
       "command": "npx",
-      "args": ["-y", "@danskebank/mcp-api-proxy"],
+      "args": ["-y", "@danskebank/mcp-api-proxy@latest"],
       "env": {
         "MCP_SERVER_API_KEY": "your-mcp-api-key",
         "CLIENT_ID": "your-client-id",
         "CLIENT_CERT_PEM": "/absolute/path/to/client-cert.pem",
         "CLIENT_KEY_PEM": "/absolute/path/to/client-key.pem",
-        // Only if your key is encrypted:
-        // "CLIENT_KEY_PASSPHRASE": "…",
-        "TOKEN_SCOPE": "accounts",
+        // Private keys are encrypted by default:
+        "CLIENT_KEY_PASSPHRASE": "your-key-passphrase",
       },
     },
   },
@@ -188,11 +204,10 @@ Then add them to the `env` block of your client configuration:
 Notes:
 
 - Use **absolute paths** for the PEM files.
-- Certificate files must contain a `-----BEGIN CERTIFICATE-----` block; key files a `-----BEGIN PRIVATE KEY-----` block.
-- `TOKEN_SCOPE` selects one Premium API product per process. Restart with a different scope to use another. A returned `scope` does not override this setting; see [token response validation](README.md#oauth-token-response-validation).
-- The **Payment Collection API** has its own token endpoint: also set `SANDBOX_TOKEN_URL` and `LIVE_TOKEN_URL` as listed in the [README](README.md#token-url-defaults). If you use other Premium APIs too, put it in a separate proxy entry with a name that says so, such as `danske-payment-collection`.
+- Certificate files must contain a `-----BEGIN CERTIFICATE-----` block; key files a `-----BEGIN PRIVATE KEY-----` or `-----BEGIN ENCRYPTED PRIVATE KEY-----` block. Private keys are encrypted by default, so `CLIENT_KEY_PASSPHRASE` is needed.
+- The proxy requests the scopes `accounts payments` in one token request, and every Premium API, including the **Payment Collection API**, uses the same token endpoint. If your client is registered for only one product and the token request is rejected, the `[auth]` error says so: set `TOKEN_SCOPE` (for example `TOKEN_SCOPE=accounts`) in the `env` block or your settings file and restart. A returned `scope` does not change what the proxy requests; see [token response validation](README.md#oauth-token-response-validation).
 - Values in the `env` block end up in your client's config file. To keep them out of it, use a settings file with `--settings-file` (Step 6).
-- Without `--settings-file`, the proxy also reads a `.env` file from its working directory, which your client chooses. VS Code uses your workspace folder, so a `.env` in your project is read too (values in the `env` block win). Pass `--settings-file` to choose the file yourself.
+- The proxy never reads a `.env` file from its working directory (VS Code uses your workspace folder). If there is one, the proxy says so on stderr. Pass `--settings-file` to use it.
 - Production is **GET-only** in this proxy as a safety guard.
 - Check stderr startup output for `enabled-tiers` and `default-tier`. Partial OAuth/mTLS settings list missing variable names without exposing values; leaving all OAuth/mTLS settings unset is a valid mock/discovery-only setup. The hosted MCP server API key is still required for discovery.
 - The default remains live when its host and credentials are complete, otherwise sandbox, otherwise mock. Adding live credentials can make omitted-tier calls use real data; specify `tier` per call to choose explicitly.
@@ -205,10 +220,11 @@ See the [README](README.md) for the full list of environment variables and for e
 ## Step 6 — Keep secrets out of your config file (optional)
 
 Secrets such as `MCP_SERVER_API_KEY` and `CLIENT_KEY_PASSPHRASE` from Step 5
-sit in plain text if you put them directly in your client's config file.
-There are two ways to avoid that.
+sit in plain text if you put them directly in your client's config file, and a
+personal configuration file is not a secret store. The way to avoid that in
+every client is a settings file.
 
-### Option A: a settings file (any client)
+### A settings file (any client)
 
 Put the settings in a file outside your project, for example `danske-proxy.env` in your home folder:
 
@@ -217,74 +233,31 @@ MCP_SERVER_API_KEY=your-mcp-api-key
 CLIENT_ID=your-client-id
 CLIENT_CERT_PEM=/absolute/path/to/client-cert.pem
 CLIENT_KEY_PEM=/absolute/path/to/client-key.pem
-# CLIENT_KEY_PASSPHRASE=…
-TOKEN_SCOPE=accounts
+CLIENT_KEY_PASSPHRASE=your-key-passphrase
 ```
 
 Then pass the file to the proxy with `--settings-file` and drop the `env` block:
 
 ```jsonc
 {
-  "servers": {
+  "mcpServers": {
     "danske-bank-apis": {
       "command": "npx",
-      "args": ["-y", "@danskebank/mcp-api-proxy", "--settings-file", "/absolute/path/to/danske-proxy.env"],
+      "args": ["-y", "@danskebank/mcp-api-proxy@latest", "--settings-file", "/absolute/path/to/danske-proxy.env"],
     },
   },
 }
 ```
 
-- Claude Desktop uses the same `args`, under `mcpServers` instead of `servers`. In HTTP mode, start the proxy with `danske-mcp-proxy --transport http --settings-file /absolute/path/to/danske-proxy.env`.
+- This is the same entry in VS Code (`.copilot/mcp-config.json`, with the `"type"` and `"tools"` lines from Step 3) and in Claude Desktop (without them). For Claude Code, run `claude mcp add danske-bank-apis -- npx -y @danskebank/mcp-api-proxy@latest --settings-file /absolute/path/to/danske-proxy.env`. In HTTP mode, start the proxy with `npx -y @danskebank/mcp-api-proxy@latest --transport http --settings-file /absolute/path/to/danske-proxy.env`.
 - Use an absolute path (a leading `~/` also works). The proxy stops with an error if the file is missing, and it never logs the values.
 - Quote values that contain `#` or spaces, e.g. `CLIENT_KEY_PASSPHRASE="p#ss phrase"`.
 - Values in an `env` block still win over the file.
 - Make the file readable only by you, and never commit it.
 
-### Option B: VS Code input prompts
+### VS Code input prompts
 
-VS Code can prompt for the MCP server API key instead of putting it in plain
-text. This example also prompts for the passphrase of an encrypted client
-private key for sandbox/live calls. Each `inputs` entry is referenced with
-`${input:<id>}`:
-
-```jsonc
-{
-  "servers": {
-    "danske-bank-apis": {
-      "command": "npx",
-      "args": ["-y", "@danskebank/mcp-api-proxy"],
-      "env": {
-        "MCP_SERVER_API_KEY": "${input:mcpApiKey}",
-        "CLIENT_ID": "your-client-id",
-        "CLIENT_CERT_PEM": "/absolute/path/to/client-cert.pem",
-        "CLIENT_KEY_PEM": "/absolute/path/to/client-key.pem",
-        "CLIENT_KEY_PASSPHRASE": "${input:keyPassphrase}",
-        "TOKEN_SCOPE": "accounts",
-      },
-    },
-  },
-  "inputs": [
-    {
-      "id": "mcpApiKey",
-      "type": "promptString",
-      "description": "Danske Bank MCP server API key",
-      "password": true,
-    },
-    {
-      "id": "keyPassphrase",
-      "type": "promptString",
-      "description": "Passphrase for CLIENT_KEY_PEM",
-      "password": true,
-    },
-  ],
-}
-```
-
-With `"password": true` the input box is masked while you type.
-
-**Can it prompt every time instead of storing the value?** Not directly. The first time you start the server, VS Code asks once and then keeps the value in your OS's secure credential store (Keychain / Credential Manager / libsecret) — never in `mcp.json` and never in plain text — reusing it on later starts. There's no setting to force a fresh prompt every single start. To make it ask again (for example, after rotating the API key or changing the passphrase), run **MCP: Reset Cached Tools / Inputs** from the Command Palette and restart the server.
-
-This `inputs` mechanism is specific to VS Code's `mcp.json`. For Claude Desktop and HTTP mode, use a settings file (Option A).
+VS Code's masked `${input:...}` prompts (`"type": "promptString"` with `"password": true`) work only in the older VS Code format (`servers` in `.vscode/mcp.json` or the user-profile `mcp.json`), which VS Code now labels deprecated. Servers that need them are not forwarded to Copilot sessions, and the portable `mcpServers` files, such as `.copilot/mcp-config.json`, do not support them. Use a settings file instead. See VS Code's [MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration#_authentication-and-secrets).
 
 ---
 
@@ -293,11 +266,12 @@ This `inputs` mechanism is specific to VS Code's `mcp.json`. For Claude Desktop 
 | Problem                                | What to try                                                                            |
 | -------------------------------------- | -------------------------------------------------------------------------------------- |
 | `node --version` fails                 | Node.js is not installed or not on your `PATH` — see Step 1                            |
-| The server does not appear under Tools | Check the config file path and syntax, then restart your AI client                     |
-| `Cannot find module`                   | Re-run `npm install -g @danskebank/mcp-api-proxy`, or use the `npx` form above          |
-| No tools / discovery unavailable       | Verify `MCP_SERVER_API_KEY` is set to a valid key, check network access to `https://mcp.danskebank.com/mcp`, and inspect the proxy log for an upstream connection error |
-| `401` on API calls                     | Verify `CLIENT_ID`, the certificate/key pair, and that `TOKEN_SCOPE` matches your product. Payment Collection API: also set its token URLs ([README](README.md#token-url-defaults)) |
-| `[auth]` token error                   | Check the credential files, client ID, scope and token URL. Invalid token responses name the tier and invalid fields, not their values; see [token response validation](README.md#oauth-token-response-validation). The token response body is hidden. |
+| The server does not appear under Tools | Check the config file path and syntax (VS Code: `.copilot/mcp-config.json` in your home folder, top-level `mcpServers`), then restart your AI client |
+| Nothing happens on the first start     | `npx` downloads the proxy the first time: check network access to the npm registry, wait a little, and check that `npx` is on the `PATH` your client uses (it comes with Node.js) |
+| `Cannot find module`                   | Make sure the `args` start with `-y` and `@danskebank/mcp-api-proxy@latest`, or re-run `npm install -g @danskebank/mcp-api-proxy` if you use the global install |
+| No tools / discovery unavailable       | Look for `[auth]`, `[rate_limited]` or `[upstream]` in the proxy log: `MCP_SERVER_API_KEY` is missing or was rejected (fix the key and restart), there were too many invalid key attempts (wait a few minutes, then restart), or the hosted server could not verify the key right now (try again later, then restart). Otherwise check network access to `https://mcp.danskebank.com/mcp` and inspect the proxy log for an upstream connection error |
+| `401` on API calls                     | Verify `CLIENT_ID`, the certificate/key pair, and that your client is registered for the API's product (`accounts` or `payments`). The proxy requests both scopes by default; if your client is registered for only one, set `TOKEN_SCOPE` (for example `TOKEN_SCOPE=accounts`) and restart. |
+| `[auth]` token error                   | Check the credential files and client ID. If the message says the token request was rejected, your client may be registered for fewer products than the default scopes: set `TOKEN_SCOPE` (for example `TOKEN_SCOPE=accounts`) and restart. Invalid token responses name the tier and invalid fields, not their values; see [token response validation](README.md#oauth-token-response-validation). The token response body is hidden. |
 | `[upstream]` request error             | Check connectivity and the upstream settings. Raw upstream error text is intentionally hidden. |
 | `[configuration]` startup error        | Check the named setting or file path locally; invalid values and stack traces are intentionally not printed. |
 | `ENOENT` for a PEM file                | Use an absolute path, and check the file is readable by the user running the client    |
@@ -319,7 +293,7 @@ replay a non-GET request after an error.
 Default audit logs mask all URL path segments and query values; see [Audit Logging](README.md#audit-logging). Do not include credentials or raw API data when sharing diagnostics.
 
 - API questions and credentials: [Danske Bank Developer Portal](https://developers.danskebank.com)
-- Bugs in this proxy: report them at the [Danske Bank Developer Portal](https://developers.danskebank.com)
+- Bugs in this proxy: report them through the [contact page](https://developers.danskebank.com/premium-apis/contact-us)
 
 Include your installed package version (`npm list -g @danskebank/mcp-api-proxy --depth=0`
 for a global install), Node.js version, transport, environment/tier, safe error

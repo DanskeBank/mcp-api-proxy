@@ -10,6 +10,7 @@ Open-source MCP auth proxy for Danske Bank APIs. Connects to the hosted Danske B
 
 - [Quick Start](#quick-start)
 - [Transport Modes](#transport-modes)
+- [Command-Line Options](#command-line-options)
 - [Environment Variables](#environment-variables)
 - [Client Configuration](#client-configuration)
 - [Hosts](#hosts)
@@ -58,57 +59,72 @@ node dist/index.js --transport http --settings-file /absolute/path/to/danske-pro
 # Listens on http://127.0.0.1:3001/mcp by default
 
 # Custom port:
-MCP_HTTP_PORT=8080 node dist/index.js --transport http --settings-file /absolute/path/to/danske-proxy.env
+node dist/index.js --transport http --port 8080 --settings-file /absolute/path/to/danske-proxy.env
 ```
 
 > **Loopback by default.** The CLI binds to `127.0.0.1` and validates the
-> `Origin` header to prevent DNS-rebinding attacks from browsers. To expose
+> `Origin` and `Host` headers to prevent DNS-rebinding attacks from browsers.
+> The `Host` check applies only while `--host` is a loopback address
+> (`127.0.0.1`, `::1` or `localhost`); the proxy then accepts requests
+> addressed to `localhost`, `127.0.0.1` or `[::1]` on the `--port` port. A
+> reverse proxy or port forward in front of that listener must keep such a
+> `Host` (nginx does by default for `proxy_pass http://127.0.0.1:<port>`),
+> otherwise its requests get 403 errors. On any other bind the check is
+> skipped, because the proxy is then reached under other host names, and the
+> proxy prints a notice. To expose
 > the proxy to a wider network, deploy it behind your own auth/reverse-proxy
 > wrapper (see [Add your own auth layer](#add-your-own-auth-layer) for the pattern)
 > rather than rebinding the CLI directly. If you do need a different bind
-> for trusted setups, set `MCP_HTTP_HOST` (e.g. `MCP_HTTP_HOST=0.0.0.0`).
+> for trusted setups, pass `--host` (e.g. `--host 0.0.0.0`).
 
 > **Single credential, single tenant.** All callers of one HTTP proxy share
-> its configured bank client ID, client certificate/private key, OAuth scope
+> its configured bank client ID, client certificate/private key
 > and token manager/cache. Separate MCP session IDs do not isolate bank
 > credentials per customer. Adding caller authentication in a reverse proxy
 > or wrapper authenticates those callers; it does not give each caller a
 > different bank identity. Use separately configured, isolated instances for
 > different bank tenants, not one shared HTTP instance.
 
+## Command-Line Options
+
+| Option                       | Default     | Description                                                                                                                |
+| ---------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `--transport stdio\|http`    | `stdio`     | How the proxy talks to your MCP client                                                                                     |
+| `--settings-file <path>`     | —           | File with the [settings](#environment-variables) below (see [Settings file](#settings-file))                              |
+| `--port <number>`            | `3001`      | HTTP listen port (only in `--transport http` mode)                                                                         |
+| `--host <address>`           | `127.0.0.1` | HTTP bind address (only in `--transport http` mode). Use `0.0.0.0` only behind your own auth/reverse proxy.               |
+
+The production hosts, token endpoints and OAuth scope are built into the
+package, so there is nothing to configure for them. Session limits and
+rate limits of the HTTP transport are options of
+`createHttpSessionHandler` (see [Custom Audit Logger](#custom-audit-logger)),
+not command-line settings.
+
 ## Environment Variables
 
 | Variable                   | Required         | Default           | Description                                                                                                          |
 | -------------------------- | ---------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `MCP_API_HOST_MOCK`        | No               | `mock-api.danskebank.com` | Override the mock API host.                                                                                   |
-| `MCP_API_HOST_SANDBOX`     | No               | `sandbox-api.danskebank.com` | Override the sandbox API host.                                                                             |
-| `MCP_API_HOST_LIVE`        | No               | `api.danskebank.com` | Override the live API host.                                                                                     |
+| `MCP_SERVER_API_KEY`       | Yes              | —                 | API key sent as `X-API-Key`. Required for the hosted MCP server, including production.                              |
 | `CLIENT_ID`                | Sandbox/Live     | —                 | OAuth2 client ID from Developer Portal; partial auth settings produce a startup warning naming missing variables     |
 | `CLIENT_CERT_PEM`          | Sandbox/Live     | —                 | Path to PEM-encoded x509 client certificate for mTLS (shared by both sandbox and live tiers)                         |
-| `CLIENT_KEY_PEM`           | Sandbox/Live     | —                 | Path to PEM-encoded private key (may be encrypted)                                                                   |
-| `CLIENT_KEY_PASSPHRASE`    | If key encrypted | —                 | Passphrase for `CLIENT_KEY_PEM`                                                                                      |
-| `TOKEN_SCOPE`              | No               | `accounts`        | OAuth2 scope for the Premium API product (single scope per process — restart for another)                            |
-| `SANDBOX_TOKEN_URL`        | No               | (see below)       | Override sandbox token endpoint, e.g. for the Payment Collection API (see [token URL defaults](#token-url-defaults)) |
-| `LIVE_TOKEN_URL`           | No               | (see below)       | Override live/production token endpoint; complete live credentials make live the default tier (real data, GET only)  |
-| `MCP_SERVER_URL`           | No               | `https://mcp.danskebank.com/mcp` | Override upstream MCP server URL.                                                                      |
-| `MCP_SERVER_CA_CERT`       | No               | —                 | Optional additional CA bundle for custom upstream MCP server or API hosts. Not bundled — supply your own path, same as `CLIENT_CERT_PEM`. |
-| `MCP_SERVER_API_KEY`       | Hosted MCP       | —                 | API key sent as `X-API-Key`. Required for the hosted MCP server, including production; omit only for custom upstream servers that do not require a key. |
-| `MCP_HTTP_PORT`            | No               | `3001`            | HTTP listen port (only in `--transport http` mode)                                                                   |
-| `MCP_HTTP_HOST`            | No               | `127.0.0.1`       | HTTP bind address (only in `--transport http` mode). Use `0.0.0.0` only behind your own auth/reverse proxy.          |
-| `MCP_TRUST_PROXY`          | No               | unset             | When `1`/`true`, trust `X-Forwarded-For` header for client IP detection. Only enable behind a trusted reverse proxy. |
-| `MCP_MAX_SESSIONS`         | No               | `100`             | Maximum concurrent HTTP sessions. New connections receive 503 when full.                                             |
-| `MCP_SESSION_TTL_MS`       | No               | `1800000` (30 m)  | Idle session TTL in milliseconds. In-flight POST requests are protected; idle time starts when they finish.          |
-| `MCP_RATE_LIMIT_PER_IP`    | No               | `10`              | Max new sessions a single IP can create per rate-limit window.                                                       |
-| `MCP_RATE_LIMIT_WINDOW_MS` | No               | `60000` (1 min)   | Sliding window duration (ms) for the per-IP session creation rate limit.                                             |
+| `CLIENT_KEY_PEM`           | Sandbox/Live     | —                 | Path to PEM-encoded private key (encrypted by default)                                                               |
+| `CLIENT_KEY_PASSPHRASE`    | Sandbox/Live     | —                 | Passphrase for `CLIENT_KEY_PEM`. Private keys are encrypted by default, so set it; leave it out only for a key you decrypted yourself. The proxy warns at startup when it is missing. |
+| `MCP_SERVER_CA_CERT`       | No               | —                 | Optional extra CA bundle (PEM) for custom upstream MCP server or API hosts, trusted in addition to Node's built-in CAs. Not bundled — supply your own path, same as `CLIENT_CERT_PEM`. |
+| `TOKEN_SCOPE`              | No               | `accounts payments` | Space-delimited OAuth2 scopes to request. Set it only if your client is registered for fewer products, for example `TOKEN_SCOPE=accounts`; see [Token endpoints and scope](#token-endpoints-and-scope). |
+
+Settings that earlier versions accepted (`MCP_SERVER_URL`, `MCP_API_HOST_*`,
+`SANDBOX_TOKEN_URL`, `LIVE_TOKEN_URL`, `MCP_HTTP_PORT`,
+`MCP_HTTP_HOST`, `MCP_MAX_SESSIONS`, `MCP_SESSION_TTL_MS`, `MCP_RATE_LIMIT_*` and
+`MCP_TRUST_PROXY`) are ignored. The proxy lists the ones it finds on stderr, by
+name only. Use `--port` and `--host` for the HTTP listener.
 
 #### Authentication readiness and default tier
 
 Startup diagnostics on stderr show `enabled-tiers` and `default-tier`, using the same
 host and credential checks as `call_endpoint`. Partial authentication settings name
-the missing variables, never their values. A credential, key passphrase or explicit
-token URL indicates an authentication attempt; production's built-in token URLs
-alone do not. With no OAuth/mTLS settings, mock/discovery-only operation is intentional
-and does not produce an incomplete-auth warning.
+the missing variables, never their values. A credential or key passphrase indicates
+an authentication attempt. With no OAuth/mTLS settings, mock/discovery-only operation
+is intentional and does not produce an incomplete-auth warning.
 
 For compatibility, the default remains **live, then sandbox, then mock**, choosing
 the first tier whose host and credentials are available. Adding complete live
@@ -125,7 +141,7 @@ node dist/index.js --settings-file /absolute/path/to/danske-proxy.env
 ```
 
 - `--settings-file <path>` (or `--settings-file=<path>`) loads that file whatever the working directory, and no other file. A relative path is resolved against the working directory, and a leading `~/` against your home directory. A missing file stops the proxy with an error.
-- Without `--settings-file`, the proxy loads `.env` from its working directory if there is one. MCP clients that launch the proxy over stdio choose that directory (VS Code uses the workspace folder), so a project's `.env` can end up in the proxy's settings: pass `--settings-file` to choose the file yourself.
+- The proxy never reads a `.env` from its working directory on its own. MCP clients that launch the proxy over stdio choose that directory (VS Code uses the workspace folder), so a project's `.env` would otherwise end up in the proxy's settings. If one is there, the proxy says on stderr that it was not loaded; pass `--settings-file` to use it.
 - Variables that are already set (your client's `env` block, your shell) win over the file.
 - The file uses `.env` syntax: quote values that contain `#` or spaces, e.g. `CLIENT_KEY_PASSPHRASE="p#ss phrase"`.
 - The proxy logs the path of the file it loaded, never the values. Never commit the file; `.env` is gitignored.
@@ -135,36 +151,33 @@ node dist/index.js --settings-file /absolute/path/to/danske-proxy.env
 
 - `*_CERT_PEM` files must contain a `-----BEGIN CERTIFICATE-----` block.
 - `*_KEY_PEM` files must contain a `-----BEGIN PRIVATE KEY-----` (or `RSA PRIVATE KEY`, `EC PRIVATE KEY`, `ENCRYPTED PRIVATE KEY`) block.
-- If the key is encrypted, set the matching `*_PASSPHRASE` variable.
+- Private keys are encrypted by default (`ENCRYPTED PRIVATE KEY`), so set `CLIENT_KEY_PASSPHRASE`. Without it the proxy cannot read the key.
 - The same client cert is used for **both** the OAuth2 token endpoint and the API calls themselves.
 
-#### Token URL defaults
+#### Token endpoints and scope
 
-The public proxy uses these token endpoints by default:
+Token endpoints are built into the package. Each tier signs in at its own host, and every Premium API, including the Payment Collection API, uses that endpoint:
 
-| Tier | Default token URL |
-| ---- | ----------------- |
+| Tier | Token URL |
+| ---- | --------- |
 | Sandbox | `https://sandbox-api.danskebank.com/sandbox-corporate/api/dk/business/oauth2/token` |
 | Live | `https://api.danskebank.com/corporate/api/dk/business/oauth2/token` |
 
-All Premium APIs use these token endpoints except the **Payment Collection API** (Collection Service API, paths under `.../v1/collection-service`), which has its own. To call it, set both overrides (and the `TOKEN_SCOPE` its documentation names):
+By default the proxy requests the scopes `accounts payments` in a single token request: the OAuth 2.0 `scope` parameter is a space-delimited list in which each value adds an access range ([RFC 6749, section 3.3](https://datatracker.ietf.org/doc/html/rfc6749#section-3.3)). The token service decides what it grants, and the API enforces what your client is registered for.
 
-```bash
-SANDBOX_TOKEN_URL=https://sandbox-api.danskebank.com/sandbox-corporate/api/fi/business/oauth2/token
-LIVE_TOKEN_URL=https://api.danskebank.com/corporate/api/fi/business/oauth2/token
-```
-
-One proxy process uses one token endpoint per tier, so if you also call other Premium APIs, run a second proxy entry with its own settings file for the Payment Collection API. Give it a name that says so, such as `danske-payment-collection`: both entries offer the same tools, and the entry name is how your assistant picks the right `call_endpoint`.
+If your client is registered for fewer products, the token service can reject that request. The `[auth]` error then says so and names the fix: set `TOKEN_SCOPE` to the scopes your client is registered for (for example `TOKEN_SCOPE=accounts`) in the `env` block or your [settings file](#settings-file), and restart the proxy. `TOKEN_SCOPE` only narrows what is requested; it cannot change where credentials are sent. The proxy does not echo a `TOKEN_SCOPE` you set.
 
 ## Client Configuration
 
+The examples start the proxy from your build (`node /path/to/mcp-api-proxy/dist/index.js`). Users of the published package use `npx -y @danskebank/mcp-api-proxy@latest` instead, as in [GETTING-STARTED.md](GETTING-STARTED.md).
+
 ### VS Code (GitHub Copilot)
 
-Add to `.vscode/mcp.json`:
+Run **MCP: Add Server**, choose **Command (stdio)**, enter the server ID `danske-bank-apis`, then select **Global** and **Copilot Global**. That writes the portable `mcpServers` file `.copilot/mcp-config.json` in your home folder. Add to it:
 
 ```jsonc
 {
-  "servers": {
+  "mcpServers": {
     "danske-bank-apis": {
       "command": "node",
       "args": ["/path/to/mcp-api-proxy/dist/index.js"],
@@ -180,7 +193,7 @@ Or with sandbox credentials:
 
 ```jsonc
 {
-  "servers": {
+  "mcpServers": {
     "danske-bank-apis": {
       "command": "node",
       "args": ["/path/to/mcp-api-proxy/dist/index.js"],
@@ -189,27 +202,32 @@ Or with sandbox credentials:
         "CLIENT_ID": "your-client-id",
         "CLIENT_CERT_PEM": "/path/to/client-cert.pem",
         "CLIENT_KEY_PEM": "/path/to/client-key.pem",
-        // Only needed when CLIENT_KEY_PEM is encrypted:
-        // "CLIENT_KEY_PASSPHRASE": "…",
+        // Private keys are encrypted by default:
+        "CLIENT_KEY_PASSPHRASE": "your-key-passphrase",
       },
     },
   },
 }
 ```
 
-To keep the credentials out of `mcp.json`, put them in a [settings file](#settings-file) and point VS Code's `envFile` at it (or pass `"--settings-file", "/absolute/path/to/danske-proxy.env"` in `args`):
+To keep the credentials out of the config file, put them in a [settings file](#settings-file) and pass it with `--settings-file`. The portable file supports neither `envFile` nor VS Code input prompts:
 
 ```jsonc
 {
-  "servers": {
+  "mcpServers": {
     "danske-bank-apis": {
       "command": "node",
-      "args": ["/path/to/mcp-api-proxy/dist/index.js"],
-      "envFile": "/absolute/path/to/danske-proxy.env",
+      "args": [
+        "/path/to/mcp-api-proxy/dist/index.js",
+        "--settings-file",
+        "/absolute/path/to/danske-proxy.env",
+      ],
     },
   },
 }
 ```
+
+The older VS Code format (a `servers` object in `.vscode/mcp.json` or the user-profile `mcp.json`) still works for Local sessions and also supports `envFile` and `${input:...}` prompts, but VS Code labels it deprecated and does not forward servers that need prompts to Copilot sessions. See VS Code's [MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration).
 
 ### Claude Desktop
 
@@ -261,12 +279,13 @@ Then point any MCP client that supports Streamable HTTP to:
 http://127.0.0.1:3001/mcp
 ```
 
-For example, in VS Code:
+For example, in VS Code (`.copilot/mcp-config.json`):
 
 ```jsonc
 {
-  "servers": {
+  "mcpServers": {
     "danske-bank-apis": {
+      "type": "http",
       "url": "http://127.0.0.1:3001/mcp",
     },
   },
@@ -275,7 +294,8 @@ For example, in VS Code:
 
 ## Hosts
 
-The public proxy connects to these hosts by default:
+The proxy connects to these hosts. They are built into the package and cannot
+be changed through settings:
 
 | Service | Default host |
 | ------- | ------------ |
@@ -291,12 +311,24 @@ key. Get yours from the [MCP API-key page](https://developers.danskebank.com/mcp
 and set `MCP_SERVER_API_KEY` to that key before connecting. The proxy sends
 it as `X-API-Key` on every request to the upstream MCP server.
 
-Without a valid key, hosted catalog discovery is unavailable. If a custom
-upstream server does not require an API key, leave `MCP_SERVER_API_KEY` unset;
-the proxy then sends no `X-API-Key` header.
+Without a valid key, hosted catalog discovery is unavailable and only
+`call_endpoint` is exposed. The proxy says why: on stderr, in the server
+instructions and in the result of a discovery tool call, it reports
 
-This key is separate from the mTLS and OAuth2 credentials required for
-sandbox/live API calls.
+- `[auth]` when `MCP_SERVER_API_KEY` is not set or the hosted server rejected
+  it (including an HTTP 401 or 403 from a gateway in front of it),
+- `[rate_limited]` after too many invalid key attempts from your address, or
+- `[upstream]` when the hosted server could not verify the key right now. This
+  is usually temporary; the proxy tries three times before reporting it.
+
+A rejected key is not retried. The proxy remembers a refusal for one minute
+per process, so an HTTP proxy with many sessions, or an agent calling tools in
+a loop, does not keep sending the key to a server that limits invalid attempts.
+A different key, or a refusal older than a minute, is tried again. The key is
+never printed. Fix `MCP_SERVER_API_KEY` and restart the proxy; discovery returns
+only after a restart. This key is
+separate from the mTLS and OAuth2 credentials required for sandbox/live API
+calls.
 
 ## Tools
 
@@ -337,7 +369,7 @@ Before caching a sandbox or live token, the proxy requires a JSON object with:
 
 Malformed JSON or invalid fields fail with an `[auth]` error naming the tier and invalid fields, never their values or a response-body excerpt. The response is not cached; a later call can request a new token.
 
-The returned `scope` is ignored, including when it differs from `TOKEN_SCOPE`. The proxy continues requesting the configured `TOKEN_SCOPE` when minting and refreshing tokens; it does not compare granted scopes or change API permissions. The API enforces the token's actual grants, so a narrower grant can still cause an API authorization failure.
+The returned `scope` is ignored, including when it differs from the requested scopes. The proxy continues requesting the same scopes when minting and refreshing tokens; it does not compare granted scopes or change API permissions. The API enforces the token's actual grants, so a narrower grant can still cause an API authorization failure.
 
 ### Error reporting
 
@@ -437,6 +469,7 @@ export class SplunkAuditLogger implements AuditLogger {
 import { createServer as createHttpServer } from "node:http";
 import {
   createHttpSessionHandler,
+  createLoopbackHostCheck,
   createLoopbackOriginCheck,
 } from "@danskebank/mcp-api-proxy";
 import { SplunkAuditLogger } from "./my-logger.js";
@@ -455,9 +488,11 @@ const sessions = createHttpSessionHandler({
 });
 
 const isAllowedOrigin = createLoopbackOriginCheck({ port: 3001 });
+// Only valid when clients reach this server directly under a loopback name, as below.
+const isAllowedHost = createLoopbackHostCheck({ port: 3001 });
 
 const httpServer = createHttpServer((req, res) => {
-  if (!isAllowedOrigin(req.headers.origin)) {
+  if (!isAllowedHost(req.headers.host) || !isAllowedOrigin(req.headers.origin)) {
     res.writeHead(403).end();
     return;
   }
@@ -484,7 +519,8 @@ httpServer.listen(3001, "127.0.0.1", () => {
 `createHttpSessionHandler` enforces the same protections as the built-in CLI:
 max-session cap, idle reaper, per-IP rate limit, shared upstream
 `TokenManager`, and graceful shutdown. Prefer it over wiring
-`StreamableHTTPServerTransport` yourself.
+`StreamableHTTPServerTransport` yourself. The CLI runs it with the values in the
+example above, which only an embedding process like this one can change.
 
 Rejected or disconnected initialization requests release their session slots and
 close their per-request proxy resources. The session cap includes pending
@@ -594,7 +630,7 @@ export async function withAuth(
 //
 // Then, inside the httpServer callback above, replace everything from the
 // `// Add your own auth middleware here.` comment onward — the
-// isAllowedOrigin check before it is unchanged:
+// isAllowedHost and isAllowedOrigin checks before it are unchanged:
 if (req.url?.split("?")[0] !== "/mcp") {
   res.writeHead(404).end("Not found");
   return;
@@ -640,15 +676,15 @@ If you don't need customization, run the built-in CLI with your
 
 ```bash
 # stdio
-npx @danskebank/mcp-api-proxy --settings-file /absolute/path/to/danske-proxy.env
+npx -y @danskebank/mcp-api-proxy@latest --settings-file /absolute/path/to/danske-proxy.env
 # HTTP
-npx @danskebank/mcp-api-proxy --transport http --settings-file /absolute/path/to/danske-proxy.env
+npx -y @danskebank/mcp-api-proxy@latest --transport http --settings-file /absolute/path/to/danske-proxy.env
 ```
 
 ## Development
 
 ```bash
-npm run dev          # Run with tsx (no build step)
+npm run dev -- --settings-file .env   # Run with tsx (no build step); the .env is not read unless you pass it
 npm run lint         # Lint source and release tooling
 npm run typecheck    # Type-check source, release tooling and tests without emitting files
 npm run build        # Compile TypeScript

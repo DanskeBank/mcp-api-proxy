@@ -3,31 +3,16 @@ import { createServer as createHttpServer } from "node:http";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer, logStartup } from "./server.js";
 import { ProxyError, safeErrorMessage } from "./errors.js";
-import { getConfig, loadSettingsFile } from "./config/config.js";
+import { getConfig, loadSettingsFile, warnRemovedSettings } from "./config/config.js";
+import {
+  createListenerHostCheck,
+  isLoopbackListenHost,
+  parseHttpListenOptions,
+} from "./cli-options.js";
 import {
   createHttpSessionHandler,
   createLoopbackOriginCheck,
 } from "./http-transport.js";
-
-function parsePort(raw: string): number {
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n < 1 || n > 65535) {
-    throw new ProxyError("configuration", {
-      hint: "Invalid MCP_HTTP_PORT. Must be an integer between 1 and 65535.",
-    });
-  }
-  return n;
-}
-
-function parsePositiveInt(name: string, raw: string): number {
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n <= 0) {
-    throw new ProxyError("configuration", {
-      hint: `Invalid ${name}. Must be a positive integer.`,
-    });
-  }
-  return n;
-}
 
 const HTTP_PATH = "/mcp";
 
@@ -46,6 +31,7 @@ function parseTransport(): "stdio" | "http" {
 async function main(): Promise<void> {
   const settingsFile = loadSettingsFile(process.argv);
   if (settingsFile) console.error(`[proxy] settings loaded from ${settingsFile}`);
+  warnRemovedSettings();
   const transport = parseTransport();
 
   if (transport === "stdio") {
@@ -67,45 +53,31 @@ async function main(): Promise<void> {
     await handle.server.connect(stdio);
     console.error("MCP proxy running on stdio");
   } else {
-    const httpPort = parsePort(process.env.MCP_HTTP_PORT ?? "3001");
-    // Bind to loopback by default. Customers exposing this on a network should
-    // run behind their own reverse proxy / auth wrapper (see README "Custom Audit
-    // Logger" section) rather than binding directly.
-    const httpHost = process.env.MCP_HTTP_HOST ?? "127.0.0.1";
-    const sessionOptions = {
-      maxSessions: parsePositiveInt(
-        "MCP_MAX_SESSIONS",
-        process.env.MCP_MAX_SESSIONS ?? "100",
-      ),
-      sessionTtlMs: parsePositiveInt(
-        "MCP_SESSION_TTL_MS",
-        process.env.MCP_SESSION_TTL_MS ?? String(30 * 60 * 1000),
-      ),
-      rateLimitPerIp: parsePositiveInt(
-        "MCP_RATE_LIMIT_PER_IP",
-        process.env.MCP_RATE_LIMIT_PER_IP ?? "10",
-      ),
-      rateLimitWindowMs: parsePositiveInt(
-        "MCP_RATE_LIMIT_WINDOW_MS",
-        process.env.MCP_RATE_LIMIT_WINDOW_MS ?? "60000",
-      ),
-      trustProxy:
-        process.env.MCP_TRUST_PROXY === "1" ||
-        process.env.MCP_TRUST_PROXY === "true",
-    };
+    const { port: httpPort, host: httpHost } = parseHttpListenOptions(process.argv);
     const config = getConfig();
-    const sessionHandler = createHttpSessionHandler({
-      ...sessionOptions,
-      proxyOptions: { config },
-    });
+    const sessionHandler = createHttpSessionHandler({ proxyOptions: { config } });
     logStartup(config);
 
     // DNS-rebinding protection. Browsers send Origin on cross-origin fetches;
     // we only accept same-origin loopback requests. Non-browser clients
     // (VS Code, Claude Desktop, curl) typically omit Origin entirely.
     const isAllowedOrigin = createLoopbackOriginCheck({ port: httpPort });
+    // A rebound page keeps the attacker's host name in `Host`, and its
+    // same-origin requests carry no `Origin`, so `Host` is checked as well
+    // (on a loopback listener only).
+    const isAllowedHost = createListenerHostCheck(httpHost, httpPort);
+    if (!isLoopbackListenHost(httpHost)) {
+      console.error(
+        "[http] Host header check skipped: --host is not a loopback address (127.0.0.1, ::1 or localhost).",
+      );
+    }
 
     const httpServer = createHttpServer((req, res) => {
+      if (!isAllowedHost(req.headers.host)) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Forbidden host" }));
+        return;
+      }
       if (!isAllowedOrigin(req.headers.origin)) {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Forbidden origin" }));
@@ -125,7 +97,7 @@ async function main(): Promise<void> {
     });
 
     httpServer.on("error", () => {
-      console.error("[http] [configuration] Cannot start the HTTP listener. Check MCP_HTTP_HOST and MCP_HTTP_PORT.");
+      console.error("[http] [configuration] Cannot start the HTTP listener. Check --host and --port.");
       void sessionHandler.closeAll().finally(() => process.exit(1));
     });
 

@@ -15,11 +15,13 @@ export type { Config, Environment, ApiHosts } from "./config/config.js";
 
 export {
   createHttpSessionHandler,
+  createLoopbackHostCheck,
   createLoopbackOriginCheck,
 } from "./http-transport.js";
 export type {
   HttpSessionHandler,
   HttpSessionHandlerOptions,
+  LoopbackHostCheckOptions,
   LoopbackOriginCheckOptions,
 } from "./http-transport.js";
 
